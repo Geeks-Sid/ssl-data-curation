@@ -303,5 +303,19 @@ def compute_patch_descriptor(
     return features
 
 
+def compute_patch_descriptors_cpu(
+    patches: list[np.ndarray],
+    slide_stats: SlideStats,
+    cfg: PatchSelectionConfig,
+    foreground_masks: list[np.ndarray | None] | None = None,
+) -> list[np.ndarray | None]:
+    if foreground_masks is None:
+        foreground_masks = [None] * len(patches)
+    return [
+        compute_patch_descriptor(patch, slide_stats, cfg, foreground_mask=foreground_mask)
+        for patch, foreground_mask in zip(patches, foreground_masks)
+    ]
+
+
 def feature_columns() -> list[str]:
     return list(FEATURE_NAMES)

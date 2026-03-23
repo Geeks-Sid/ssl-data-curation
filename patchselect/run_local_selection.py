@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch_size", type=int, default=256, help="Patch size before descriptor downsampling")
     parser.add_argument("--patch_stride", type=int, default=256, help="Patch extraction stride")
     parser.add_argument(
+        "--descriptor_backend",
+        default="cpu",
+        choices=("cpu", "cucim"),
+        help="Descriptor extraction backend",
+    )
+    parser.add_argument(
         "--downsample_size",
         type=int,
         default=None,
@@ -119,6 +125,7 @@ def main() -> None:
     cfg = PatchSelectionConfig(
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
+        descriptor_backend=args.descriptor_backend,
         downsample_size=args.downsample_size,
         slide_stats_size=args.slide_stats_size,
         use_rle_mask=not args.disable_rle_mask,

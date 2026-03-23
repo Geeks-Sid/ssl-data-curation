@@ -34,20 +34,22 @@ In the current implementation:
 - image-level `rle_mask` is used only as a foreground/background pre-filter when present
 - the problem is explicitly **patch-level re-curation after tiling**, not image-level dataset cleaning
 - the objective weights are exposed as CLI and config parameters for reproducible sweeps
+- descriptor extraction can run on the default CPU path or on an optional `cuCIM/CuPy` backend
 
 ## Workflow
 
 1. `local-select`
-   - loads Arrow shards one image at a time
-   - tiles each image into `256x256` patches
-   - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
-   - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
-   - computes slide-level stain normalization statistics on the full source image by default
-   - adds neighborhood/interface features from adjacent patches
-   - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
-   - keeps a role-based local coreset per image:
-     - `prototype`
-     - `positive_tail`
+    - loads Arrow shards one image at a time
+    - tiles each image into `256x256` patches
+    - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
+    - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
+    - computes slide-level stain normalization statistics on the full source image by default
+    - can batch the descriptor stage on GPU with `--descriptor_backend cucim`
+    - adds neighborhood/interface features from adjacent patches
+    - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
+    - keeps a role-based local coreset per image:
+      - `prototype`
+      - `positive_tail`
      - `interface`
      - `rare_state`
 
@@ -57,7 +59,23 @@ In the current implementation:
    - writes final parquet shards for downstream training
 
 3. `export-images`
-   - helper for full-image inspection from Arrow shards
+    - helper for full-image inspection from Arrow shards
+
+4. `benchmark`
+    - measures the full local-selection path on identical images for `cpu` vs `cucim`
+    - supports either Arrow-backed samples or synthetic fallback images
+
+## Backends
+
+CPU is the default backend and requires only the base dependencies already used by `patchselect`.
+
+The optional GPU backend is selected with:
+
+```bash
+python -m patchselect local-select --descriptor_backend cucim ...
+```
+
+The GPU path is designed for the descriptor stage and uses a `cuCIM/CuPy` stack. The current environment in this workspace does not have those packages installed, so the backend will report as unavailable until you install them in your CUDA-matched environment.
 
 ## Descriptor
 
@@ -98,6 +116,7 @@ Local candidate generation:
    --data_dir Data ^
    --output_dir patchselect/out/local_selection ^
    --split train ^
+   --descriptor_backend cucim ^
    --rle_min_fraction 0.75 ^
    --local_keep_ratio 0.10 ^
    --local_keep_max 4 ^
@@ -128,6 +147,18 @@ python -m patchselect export-images ^
   --limit 500
 ```
 
+Backend benchmark:
+
+```bash
+python -m patchselect benchmark ^
+  --data_dir Data ^
+  --split train ^
+  --limit_images 8 ^
+  --warmup_images 1 ^
+  --backend both ^
+  --output_json patchselect/out/benchmark_backend.json
+```
+
 ## Output
 
 `local-select` writes parquet files under:
@@ -140,6 +171,7 @@ Each row contains:
 - sample and shard identifiers
 - canonical metadata fields
 - optional RLE foreground coverage fields
+- descriptor backend provenance
 - local role assignments
 - objective terms:
   - `objective_score`

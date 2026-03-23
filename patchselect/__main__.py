@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import sys
 
+from patchselect.benchmark_backends import main as benchmark_main
 from patchselect.export_images import main as export_images_main
 from patchselect.run_global_selection import main as global_main
 from patchselect.run_local_selection import main as local_main
 
 
-HELP_TEXT = """usage: patchselect {export-images,local-select,global-select} [args]
+HELP_TEXT = """usage: patchselect {export-images,local-select,global-select,benchmark} [args]
 
 Patch selection tools for Arrow-backed IHC datasets.
 """
@@ -28,6 +29,8 @@ def main() -> None:
         local_main()
     elif command == "global-select":
         global_main()
+    elif command == "benchmark":
+        benchmark_main()
     else:
         raise SystemExit(f"Unknown command: {command}")
 

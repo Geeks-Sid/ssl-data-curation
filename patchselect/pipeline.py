@@ -11,7 +11,8 @@ from PIL import Image
 from patchselect.arrow_utils import decode_rle_mask, metadata_without_large_fields, normalize_metadata, slugify
 from patchselect.config import PatchSelectionConfig
 from patchselect.constants import FEATURE_NAMES
-from patchselect.descriptors import compute_patch_descriptor, compute_slide_stats, tile_starts
+from patchselect.descriptor_backend import compute_patch_descriptors_for_backend, compute_slide_stats_for_backend
+from patchselect.descriptors import tile_starts
 from patchselect.selection import add_neighborhood_features, compute_local_scores, role_based_local_selection
 
 
@@ -46,7 +47,7 @@ def select_patches_from_image(
     rle_mask = None
     if cfg.use_rle_mask:
         rle_mask = decode_rle_mask(metadata.get("rle_mask"), rgb.shape[0], rgb.shape[1])
-    slide_stats = compute_slide_stats(rgb, cfg, foreground_mask=rle_mask)
+    slide_stats = compute_slide_stats_for_backend(rgb, cfg, foreground_mask=rle_mask)
     starts_y = tile_starts(rgb.shape[0], cfg.patch_size, cfg.patch_stride)
     starts_x = tile_starts(rgb.shape[1], cfg.patch_size, cfg.patch_stride)
     normalized_metadata = normalize_metadata(metadata)
@@ -55,7 +56,9 @@ def select_patches_from_image(
     rle_available = int(rle_mask is not None)
     rle_slide_foreground_frac = float(rle_mask.mean()) if rle_mask is not None else None
 
-    records: list[dict] = []
+    candidate_records: list[dict] = []
+    candidate_patches: list[np.ndarray] = []
+    candidate_masks: list[np.ndarray | None] = []
     patch_index = 0
     for grid_row, top in enumerate(starts_y):
         for grid_col, left in enumerate(starts_x):
@@ -67,15 +70,9 @@ def select_patches_from_image(
                 patch_rle_fraction = float(patch_rle_mask.mean()) if patch_rle_mask.size else 0.0
                 if patch_rle_fraction < cfg.rle_min_fraction:
                     continue
-            descriptor = compute_patch_descriptor(
-                patch,
-                slide_stats,
-                cfg,
-                foreground_mask=patch_rle_mask,
-            )
-            if descriptor is None:
-                continue
-            records.append(
+            candidate_patches.append(patch)
+            candidate_masks.append(patch_rle_mask)
+            candidate_records.append(
                 {
                     "sample_id": sample_id,
                     "sample_slug": sample_slug,
@@ -88,7 +85,7 @@ def select_patches_from_image(
                     "grid_col": grid_col,
                     "image_width": int(rgb.shape[1]),
                     "image_height": int(rgb.shape[0]),
-                    "descriptor_base": descriptor,
+                    "descriptor_backend": cfg.descriptor_backend,
                     "rle_available": rle_available,
                     "rle_patch_foreground_frac": patch_rle_fraction,
                     "rle_slide_foreground_frac": rle_slide_foreground_frac,
@@ -97,6 +94,22 @@ def select_patches_from_image(
                 }
             )
             patch_index += 1
+
+    if not candidate_records:
+        return [], []
+
+    descriptors = compute_patch_descriptors_for_backend(
+        candidate_patches,
+        slide_stats,
+        cfg,
+        foreground_masks=candidate_masks,
+    )
+    records: list[dict] = []
+    for record, descriptor in zip(candidate_records, descriptors):
+        if descriptor is None:
+            continue
+        record["descriptor_base"] = descriptor
+        records.append(record)
 
     if not records:
         return [], []
@@ -125,6 +138,7 @@ def select_patches_from_image(
             "local_valid_patch_count": total_valid,
             "selection_rank": record["selection_rank"],
             "selection_role": record["selection_role"],
+            "descriptor_backend": record["descriptor_backend"],
             "rle_available": record["rle_available"],
             "rle_patch_foreground_frac": record["rle_patch_foreground_frac"],
             "rle_slide_foreground_frac": record["rle_slide_foreground_frac"],

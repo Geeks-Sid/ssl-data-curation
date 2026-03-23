@@ -13,6 +13,7 @@ setup(
     entry_points={
         "console_scripts": [
             "patchselect=patchselect.__main__:main",
+            "patchselect-benchmark=patchselect.benchmark_backends:main",
             "patchselect-export=patchselect.export_images:main",
             "patchselect-local=patchselect.run_local_selection:main",
             "patchselect-global=patchselect.run_global_selection:main",

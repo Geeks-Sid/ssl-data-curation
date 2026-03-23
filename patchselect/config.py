@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 class PatchSelectionConfig:
     patch_size: int = 256
     patch_stride: int = 256
+    descriptor_backend: str = "cpu"
     downsample_size: int | None = None
     slide_stats_size: int | None = None
     use_rle_mask: bool = True
@@ -57,6 +58,7 @@ class GlobalSelectionConfig:
             "diagnosis",
             "is_cancer",
             "selection_role",
+            "descriptor_backend",
             "rle_available",
             "rle_patch_foreground_frac",
             "rle_slide_foreground_frac",
