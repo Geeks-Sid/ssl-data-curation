@@ -1,26 +1,56 @@
 # Patchselect
 
-`patchselect` is a staged patch curation pipeline for large Arrow-backed IHC datasets.
+`patchselect` is a staged patch re-curation pipeline for large Arrow-backed IHC datasets.
 
 It is designed for the regime described in this workspace:
 
 - roughly `10M` source images
 - each image tiled into `256x256` patches
 - roughly `400M` non-empty patches after tissue filtering
-- a hard training budget where patch curation must happen before expensive SSL
+- a hard training budget where patch re-curation must happen before expensive SSL
+
+The method is framed as **budgeted semantic coverage**, not generic patch diversity.
+
+It aims to maximize compute-constrained coverage of semantically meaningful IHC states and spatial interfaces while suppressing nuisance variation and redundancy.
+
+## Objective
+
+`patchselect` uses a practical surrogate for:
+
+```text
+max_{S: |S| <= B}
+  semantic_coverage(S)
+  + lambda * interface_coverage(S)
+  - alpha * redundancy(S)
+  - beta * nuisance(S)
+```
+
+subject to per-image caps in the local stage and metadata-aware bin quotas in the global stage.
+
+In the current implementation:
+
+- patch-level scoring is **target-label-free**
+- metadata such as `tissue`, `is_cancer`, `gene`, and diagnosis text are used only for balancing or analysis
+- the problem is explicitly **patch-level re-curation after tiling**, not image-level dataset cleaning
+- the objective weights are exposed as CLI and config parameters for reproducible sweeps
 
 ## Workflow
 
 1. `local-select`
    - loads Arrow shards one image at a time
    - tiles each image into `256x256` patches
-   - computes a cheap stain-aware descriptor for every non-empty patch
+   - computes a cheap target-label-free descriptor for every non-empty patch
    - adds neighborhood/interface features from adjacent patches
-   - keeps a small local coreset per image with rarity, interface, and quality scoring
+   - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
+   - keeps a role-based local coreset per image:
+     - `prototype`
+     - `positive_tail`
+     - `interface`
+     - `rare_state`
 
 2. `global-select`
    - reads locally selected candidate parquet files
-   - rebalances the candidate pool over metadata and stain-state bins
+   - rebalances the candidate pool over metadata groups and semantic/interface bins
    - writes final parquet shards for downstream training
 
 3. `export-images`
@@ -28,19 +58,27 @@ It is designed for the regime described in this workspace:
 
 ## Descriptor
 
-Each retained patch gets a `48D` descriptor:
+Each retained patch gets a `48D` descriptor. The descriptor is implementation detail, not the method claim.
 
 - `42D` base descriptor
-  - tissue fraction
-  - DAB and hematoxylin optical-density statistics
-  - positive area fractions at multiple thresholds
-  - nuclei-density and localization proxies
-  - blur / fold / artifact proxies
-  - texture and border occupancy
+  - stain statistics
+    - DAB and hematoxylin optical-density quantiles
+    - soft histograms over normalized hematoxylin and DAB channels
+  - morphology / texture
+    - nuclei-density proxies
+    - localization proxies for nuclear / peri-nuclear / extra-nuclear staining
+    - edge and texture measures
+  - nuisance indicators
+    - holes
+    - unexpected color residuals
+    - fold-like dark smooth regions
+    - border occupancy
 - `6D` neighborhood descriptor
   - semantic difference to adjacent patches
   - positivity change to adjacent patches
   - coarse stain-state transition fraction
+
+Artifacts are treated as penalties or filters, not semantic coverage axes.
 
 The exact feature names are defined in [constants.py](/D:/FMIHCS/ssl-data-curation/patchselect/constants.py).
 
@@ -49,12 +87,16 @@ The exact feature names are defined in [constants.py](/D:/FMIHCS/ssl-data-curati
 Local candidate generation:
 
 ```bash
-python -m patchselect local-select ^
-  --data_dir Data ^
-  --output_dir patchselect/out/local_selection ^
-  --split train ^
-  --local_keep_ratio 0.10 ^
-  --local_keep_max 4
+ python -m patchselect local-select ^
+   --data_dir Data ^
+   --output_dir patchselect/out/local_selection ^
+   --split train ^
+   --local_keep_ratio 0.10 ^
+   --local_keep_max 4 ^
+   --semantic_weight 0.50 ^
+   --interface_weight 0.30 ^
+   --redundancy_weight 0.20 ^
+   --nuisance_weight 0.35
 ```
 
 Global balancing:
@@ -64,7 +106,7 @@ python -m patchselect global-select ^
   --candidate_dir patchselect/out/local_selection/candidates ^
   --output_dir patchselect/out/global_selection ^
   --target_size 10000000 ^
-  --bin_columns tissue,cell_type,state_bin ^
+  --bin_columns tissue,is_cancer,state_bin,interface_bin ^
   --bin_alpha 0.5
 ```
 
@@ -89,7 +131,13 @@ Each row contains:
 - patch coordinates
 - sample and shard identifiers
 - canonical metadata fields
-- local utility scores
+- local role assignments
+- objective terms:
+  - `objective_score`
+  - `semantic_coverage_score`
+  - `interface_score`
+  - `redundancy_penalty`
+  - `nuisance_score`
 - all `48` descriptor features
 
 `global-select` writes partitioned parquet files under:
@@ -97,3 +145,15 @@ Each row contains:
 - `patchselect/out/global_selection/final_selection/`
 
 These final parquet shards can be used as a training manifest for an on-demand crop loader, or converted into exported patch files if needed.
+
+## Recommended Evaluation Framing
+
+For a paper, evaluate on a **compute frontier** rather than a single number:
+
+- random patch sampling
+- per-image random retention
+- generic embedding-balanced curation
+- state-only selection
+- state + interface selection
+
+at fixed pretraining GPU-hours and fixed downstream recipes.

@@ -12,7 +12,7 @@ from patchselect.arrow_utils import normalize_metadata, slugify
 from patchselect.config import PatchSelectionConfig
 from patchselect.constants import FEATURE_NAMES
 from patchselect.descriptors import compute_patch_descriptor, compute_slide_stats, tile_starts
-from patchselect.selection import add_neighborhood_features, compute_local_scores, greedy_farthest_point
+from patchselect.selection import add_neighborhood_features, compute_local_scores, role_based_local_selection
 
 
 def image_to_rgb_array(image: Image.Image) -> np.ndarray:
@@ -81,8 +81,8 @@ def select_patches_from_image(
         return [], []
 
     add_neighborhood_features(records)
-    compute_local_scores(records)
-    selected = greedy_farthest_point(records, cfg)
+    compute_local_scores(records, cfg)
+    selected = role_based_local_selection(records, cfg)
     selected.sort(key=lambda item: item["selection_rank"])
     total_valid = len(records)
 
@@ -103,11 +103,21 @@ def select_patches_from_image(
             "image_height": record["image_height"],
             "local_valid_patch_count": total_valid,
             "selection_rank": record["selection_rank"],
+            "selection_role": record["selection_role"],
+            "objective_score": record["objective_score"],
             "utility": record["utility"],
             "quality_score": record["quality_score"],
+            "nuisance_score": record["nuisance_score"],
+            "semantic_coverage_score": record["semantic_coverage_score"],
             "interface_score": record["interface_score"],
+            "redundancy_penalty": record["redundancy_penalty"],
             "rarity_score": record["rarity_score"],
+            "prototype_score": record["prototype_score"],
+            "positive_tail_score": record["positive_tail_score"],
+            "interface_role_score": record["interface_role_score"],
+            "rare_state_score": record["rare_state_score"],
             "state_bin": record["state_bin"],
+            "interface_bin": record["interface_bin"],
             "gene": record["gene"],
             "tissue": record["tissue"],
             "cell_type": record["cell_type"],

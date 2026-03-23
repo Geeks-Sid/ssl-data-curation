@@ -21,12 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target_size", type=int, required=True, help="Target number of final selected patches")
     parser.add_argument(
         "--bin_columns",
-        default="tissue,cell_type,state_bin",
+        default="tissue,is_cancer,state_bin,interface_bin",
         help="Comma-separated column list used for balancing",
     )
     parser.add_argument("--bin_alpha", type=float, default=0.5, help="Tempering coefficient for bin quotas")
     parser.add_argument("--min_quota", type=int, default=0, help="Optional minimum quota per non-empty bin")
-    parser.add_argument("--utility_column", default="utility", help="Column used for within-bin ranking")
+    parser.add_argument("--utility_column", default="objective_score", help="Column used for within-bin ranking")
     return parser.parse_args()
 
 

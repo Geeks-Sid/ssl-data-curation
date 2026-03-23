@@ -31,6 +31,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local_keep_ratio", type=float, default=0.10, help="Fraction of valid patches to keep per image")
     parser.add_argument("--local_keep_min", type=int, default=1, help="Minimum selected patches per image")
     parser.add_argument("--local_keep_max", type=int, default=4, help="Maximum selected patches per image")
+    parser.add_argument(
+        "--semantic_weight",
+        type=float,
+        default=0.50,
+        help="Weight on semantic coverage in the local objective",
+    )
+    parser.add_argument(
+        "--interface_weight",
+        type=float,
+        default=0.30,
+        help="Weight on interface coverage in the local objective",
+    )
+    parser.add_argument(
+        "--quality_weight",
+        type=float,
+        default=0.15,
+        help="Weight on patch quality in the local objective",
+    )
+    parser.add_argument(
+        "--redundancy_weight",
+        type=float,
+        default=0.20,
+        help="Penalty weight on redundancy in the local objective",
+    )
+    parser.add_argument(
+        "--nuisance_weight",
+        type=float,
+        default=0.35,
+        help="Penalty weight on nuisance concentration in the local objective",
+    )
+    parser.add_argument(
+        "--state_gain_bonus",
+        type=float,
+        default=0.35,
+        help="Coverage bonus for selecting a locally unseen semantic state bin",
+    )
+    parser.add_argument(
+        "--interface_gain_bonus",
+        type=float,
+        default=0.20,
+        help="Coverage bonus for selecting a locally unseen interface bin",
+    )
     parser.add_argument("--flush_rows", type=int, default=5000, help="Rows per parquet flush")
     parser.add_argument(
         "--save_selected_patches",
@@ -63,6 +105,13 @@ def main() -> None:
         local_keep_max=args.local_keep_max,
         image_format=args.image_format,
         jpeg_quality=args.jpeg_quality,
+        semantic_weight=args.semantic_weight,
+        interface_weight=args.interface_weight,
+        quality_weight=args.quality_weight,
+        redundancy_weight=args.redundancy_weight,
+        nuisance_weight=args.nuisance_weight,
+        state_gain_bonus=args.state_gain_bonus,
+        interface_gain_bonus=args.interface_gain_bonus,
     )
 
     files = discover_arrow_files(Path(args.data_dir), split=args.split)

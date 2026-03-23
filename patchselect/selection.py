@@ -12,8 +12,28 @@ import pandas as pd
 import pyarrow.dataset as ds
 
 from patchselect.config import GlobalSelectionConfig, PatchSelectionConfig
-from patchselect.constants import NEIGHBOR_FEATURE_NAMES, SEMANTIC_FEATURE_INDICES
+from patchselect.constants import (
+    BASE_FEATURE_TO_INDEX,
+    FEATURE_TO_INDEX,
+    NEIGHBOR_FEATURE_NAMES,
+    ROLE_NAMES,
+    SEMANTIC_FEATURE_INDICES,
+)
 from patchselect.io_utils import write_dataframe_part
+
+
+def base_idx(name: str) -> int:
+    return BASE_FEATURE_TO_INDEX[name]
+
+
+def feature_idx(name: str) -> int:
+    return FEATURE_TO_INDEX[name]
+
+
+def positive_mass(base_descriptor: np.ndarray) -> float:
+    return float(
+        base_descriptor[base_idx("d_hist_50_75")] + base_descriptor[base_idx("d_hist_75_100")]
+    )
 
 
 def zscore(values: np.ndarray) -> np.ndarray:
@@ -39,17 +59,38 @@ def robust_scale(matrix: np.ndarray) -> np.ndarray:
 
 
 def stain_state_bin(descriptor: np.ndarray) -> int:
-    dab_fraction = descriptor[17]
-    if dab_fraction < 0.02:
+    dab_fraction = positive_mass(descriptor)
+    if dab_fraction < 0.05:
         stain_bin = 0
-    elif dab_fraction < 0.10:
+    elif dab_fraction < 0.20:
         stain_bin = 1
-    elif dab_fraction < 0.30:
+    elif dab_fraction < 0.45:
         stain_bin = 2
     else:
         stain_bin = 3
-    location_bin = int(np.argmax([descriptor[29], descriptor[30], descriptor[31]]))
+    location_bin = int(
+        np.argmax(
+            [
+                descriptor[base_idx("dab_in_nuc_frac")],
+                descriptor[base_idx("dab_ring_frac")],
+                descriptor[base_idx("dab_extra_frac")],
+            ]
+        )
+    )
     return 4 * location_bin + stain_bin
+
+
+def interface_bin_from_features(
+    neigh_posfrac_diff: float,
+    neigh_state_change_frac: float,
+) -> int:
+    if neigh_state_change_frac < 0.25 and neigh_posfrac_diff < 0.08:
+        return 0
+    if neigh_state_change_frac < 0.50 and neigh_posfrac_diff < 0.15:
+        return 1
+    if neigh_state_change_frac < 0.75 and neigh_posfrac_diff < 0.30:
+        return 2
+    return 3
 
 
 def add_neighborhood_features(records: list[dict]) -> None:
@@ -72,13 +113,19 @@ def add_neighborhood_features(records: list[dict]) -> None:
         else:
             neighbor_sem = semantic[neighbors]
             l1 = np.abs(neighbor_sem - semantic[idx]).sum(axis=1)
+            center_pos = positive_mass(base[idx])
+            neighbor_pos = np.array([positive_mass(base[neighbor]) for neighbor in neighbors], dtype=np.float32)
             neighbor_features = np.array(
                 [
                     float(l1.mean()),
                     float(l1.max()),
-                    float(np.abs(base[idx, 9] - base[neighbors, 9]).mean()),
-                    float(np.abs(base[idx, 17] - base[neighbors, 17]).mean()),
-                    float(np.abs(base[idx, 25] - base[neighbors, 25]).mean()),
+                    float(np.abs(base[idx, base_idx("d_mean")] - base[neighbors, base_idx("d_mean")]).mean()),
+                    float(np.abs(center_pos - neighbor_pos).mean()),
+                    float(
+                        np.abs(
+                            base[idx, base_idx("nuclei_frac")] - base[neighbors, base_idx("nuclei_frac")]
+                        ).mean()
+                    ),
                     float(
                         np.mean(
                             [stain_state_bin(base[idx]) != stain_state_bin(base[neighbor]) for neighbor in neighbors]
@@ -90,13 +137,19 @@ def add_neighborhood_features(records: list[dict]) -> None:
 
         record["descriptor"] = np.concatenate([base[idx], neighbor_features]).astype(np.float32)
         record["state_bin"] = stain_state_bin(base[idx])
+        record["interface_bin"] = interface_bin_from_features(
+            neigh_posfrac_diff=float(neighbor_features[3]),
+            neigh_state_change_frac=float(neighbor_features[5]),
+        )
 
 
-def compute_local_scores(records: list[dict]) -> None:
+def compute_local_scores(records: list[dict], cfg: PatchSelectionConfig) -> None:
     if not records:
         return
     final_matrix = np.stack([record["descriptor"] for record in records]).astype(np.float32)
     semantic = robust_scale(final_matrix[:, SEMANTIC_FEATURE_INDICES])
+    semantic_center = semantic.mean(axis=0)
+    centrality_raw = -np.abs(semantic - semantic_center).sum(axis=1)
     if len(records) == 1:
         rarity_raw = np.array([0.0], dtype=np.float32)
     else:
@@ -106,18 +159,58 @@ def compute_local_scores(records: list[dict]) -> None:
         nearest = np.partition(distances, neighbor_count - 1, axis=1)[:, :neighbor_count]
         rarity_raw = nearest.mean(axis=1)
 
-    quality_raw = final_matrix[:, 34] - 0.5 * final_matrix[:, 39] - 0.5 * final_matrix[:, 40] - 0.25 * final_matrix[:, 38]
-    interface_raw = final_matrix[:, 42] + 0.5 * final_matrix[:, 47]
+    positive_tail_raw = (
+        final_matrix[:, feature_idx("d_hist_50_75")]
+        + 2.0 * final_matrix[:, feature_idx("d_hist_75_100")]
+        + 0.5 * final_matrix[:, feature_idx("d_pos_mean")]
+    )
+    quality_raw = final_matrix[:, feature_idx("log_lap_var")] + 0.5 * final_matrix[:, feature_idx("grad_p90")]
+    interface_raw = (
+        final_matrix[:, feature_idx("neigh_sem_l1_mean")]
+        + 0.5 * final_matrix[:, feature_idx("neigh_posfrac_diff")]
+        + 0.5 * final_matrix[:, feature_idx("neigh_state_change_frac")]
+    )
+    nuisance_raw = (
+        final_matrix[:, feature_idx("unexpected_color_frac")]
+        + final_matrix[:, feature_idx("fold_frac")]
+        + 0.5 * final_matrix[:, feature_idx("hole_frac")]
+        + 0.25 * final_matrix[:, feature_idx("border_tissue_frac")]
+    )
+    semantic_coverage_raw = rarity_raw + 0.5 * positive_tail_raw + 0.25 * final_matrix[:, feature_idx("compartment_margin")]
+    redundancy_raw = -rarity_raw
+
     rarity = zscore(rarity_raw)
     quality = zscore(quality_raw)
     interface = zscore(interface_raw)
-    utility = 0.45 * rarity + 0.35 * interface + 0.20 * quality
+    nuisance = zscore(nuisance_raw)
+    semantic_coverage = zscore(semantic_coverage_raw)
+    redundancy_penalty = zscore(redundancy_raw)
+    prototype = zscore(centrality_raw) + 0.5 * quality - 0.5 * nuisance
+    positive_tail = zscore(positive_tail_raw) + 0.25 * quality - 0.5 * nuisance
+    rare_state = semantic_coverage + 0.25 * interface - 0.25 * nuisance
+    interface_role = interface + 0.25 * quality - 0.5 * nuisance
+    # Practical surrogate for semantic coverage + lambda * interface - alpha * redundancy - beta * nuisance.
+    objective = (
+        cfg.semantic_weight * semantic_coverage
+        + cfg.interface_weight * interface
+        + cfg.quality_weight * quality
+        - cfg.redundancy_weight * redundancy_penalty
+        - cfg.nuisance_weight * nuisance
+    )
 
     for idx, record in enumerate(records):
-        record["rarity_score"] = float(rarity[idx])
         record["quality_score"] = float(quality[idx])
+        record["nuisance_score"] = float(nuisance[idx])
+        record["semantic_coverage_score"] = float(semantic_coverage[idx])
+        record["redundancy_penalty"] = float(redundancy_penalty[idx])
+        record["rarity_score"] = float(rarity[idx])
         record["interface_score"] = float(interface[idx])
-        record["utility"] = float(utility[idx])
+        record["prototype_score"] = float(prototype[idx])
+        record["positive_tail_score"] = float(positive_tail[idx])
+        record["rare_state_score"] = float(rare_state[idx])
+        record["interface_role_score"] = float(interface_role[idx])
+        record["objective_score"] = float(objective[idx])
+        record["utility"] = float(objective[idx])
 
 
 def target_local_keep(count: int, cfg: PatchSelectionConfig) -> int:
@@ -125,33 +218,66 @@ def target_local_keep(count: int, cfg: PatchSelectionConfig) -> int:
     return min(cfg.local_keep_max, max(cfg.local_keep_min, scaled))
 
 
-def greedy_farthest_point(records: list[dict], cfg: PatchSelectionConfig) -> list[dict]:
+def role_based_local_selection(records: list[dict], cfg: PatchSelectionConfig) -> list[dict]:
     if not records:
         return []
-    final_matrix = np.stack([record["descriptor"] for record in records]).astype(np.float32)
-    semantic = robust_scale(final_matrix[:, SEMANTIC_FEATURE_INDICES])
-    utilities = np.array([record["utility"] for record in records], dtype=np.float32)
     keep = min(len(records), target_local_keep(len(records), cfg))
     if keep >= len(records):
-        for rank, record in enumerate(sorted(records, key=lambda item: item["utility"], reverse=True), start=1):
+        for rank, record in enumerate(sorted(records, key=lambda item: item["objective_score"], reverse=True), start=1):
             record["selection_rank"] = rank
+            record["selection_role"] = "all_retained"
         return records
 
-    selected = [int(np.argmax(utilities))]
-    min_dist = np.abs(semantic - semantic[selected[0]]).sum(axis=1)
-    min_dist[selected[0]] = -np.inf
-    utility_norm = utilities - utilities.min()
-    if utility_norm.max() > 1e-6:
-        utility_norm = utility_norm / utility_norm.max()
+    role_to_score_key = {
+        "prototype": "prototype_score",
+        "positive_tail": "positive_tail_score",
+        "interface": "interface_role_score",
+        "rare_state": "rare_state_score",
+    }
+    selected: list[int] = []
+    seen_states: set[int] = set()
+    seen_interfaces: set[int] = set()
+
+    for role in ROLE_NAMES:
+        if len(selected) >= keep:
+            break
+        ordered = sorted(
+            range(len(records)),
+            key=lambda idx: (records[idx][role_to_score_key[role]], records[idx]["objective_score"]),
+            reverse=True,
+        )
+        for idx in ordered:
+            if idx in selected:
+                continue
+            selected.append(idx)
+            records[idx]["selection_role"] = role
+            seen_states.add(records[idx]["state_bin"])
+            seen_interfaces.add(records[idx]["interface_bin"])
+            break
 
     while len(selected) < keep:
-        candidate_scores = min_dist + cfg.utility_fps_weight * utility_norm
-        candidate_scores[selected] = -np.inf
-        next_idx = int(np.argmax(candidate_scores))
-        selected.append(next_idx)
-        next_dist = np.abs(semantic - semantic[next_idx]).sum(axis=1)
-        min_dist = np.minimum(min_dist, next_dist)
+        best_idx = None
+        best_score = -np.inf
+        for idx, record in enumerate(records):
+            if idx in selected:
+                continue
+            marginal = record["objective_score"]
+            if record["state_bin"] not in seen_states:
+                marginal += cfg.state_gain_bonus
+            if record["interface_bin"] not in seen_interfaces:
+                marginal += cfg.interface_gain_bonus
+            if marginal > best_score:
+                best_score = marginal
+                best_idx = idx
 
+        if best_idx is None:
+            break
+        selected.append(best_idx)
+        records[best_idx]["selection_role"] = "coverage_fill"
+        seen_states.add(records[best_idx]["state_bin"])
+        seen_interfaces.add(records[best_idx]["interface_bin"])
+
+    selected.sort(key=lambda idx: records[idx]["objective_score"], reverse=True)
     for rank, idx in enumerate(selected, start=1):
         records[idx]["selection_rank"] = rank
     return [records[idx] for idx in selected]

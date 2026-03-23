@@ -64,6 +64,21 @@ def safe_std(values: np.ndarray) -> float:
     return float(values.std())
 
 
+def normalized_histogram(
+    values: np.ndarray,
+    bins: int = 4,
+    value_range: tuple[float, float] = (0.0, 1.0),
+) -> np.ndarray:
+    if values.size == 0:
+        return np.zeros(bins, dtype=np.float32)
+    hist, _ = np.histogram(values, bins=bins, range=value_range)
+    hist = hist.astype(np.float32)
+    total = hist.sum()
+    if total <= 0:
+        return np.zeros(bins, dtype=np.float32)
+    return hist / total
+
+
 def remove_small_components(mask: np.ndarray, min_size: int) -> np.ndarray:
     labeled, count = ndimage.label(mask)
     if count == 0:
@@ -233,14 +248,8 @@ def compute_patch_descriptor(
     features[13] = q(dn[tissue], 0.90)
     features[14] = safe_mean(en[tissue])
     features[15] = q(en[tissue], 0.90)
-    features[16] = float((dn[tissue] > 0.15).mean())
-    features[17] = float((dn[tissue] > 0.30).mean())
-    features[18] = float((dn[tissue] > 0.50).mean())
-    features[19] = float((dn[tissue] > 0.70).mean())
-    features[20] = float(((dn[tissue] > 0.15) & (dn[tissue] <= 0.30)).mean())
-    features[21] = float(((dn[tissue] > 0.30) & (dn[tissue] <= 0.50)).mean())
-    features[22] = float(((dn[tissue] > 0.50) & (dn[tissue] <= 0.70)).mean())
-    features[23] = float((dn[tissue] > 0.70).mean())
+    features[16:20] = normalized_histogram(hn[tissue], bins=4, value_range=(0.0, 1.0))
+    features[20:24] = normalized_histogram(dn[tissue], bins=4, value_range=(0.0, 1.0))
     features[24] = safe_mean(dn[dab])
     features[25] = float(nuclei.sum() / tissue_pixels)
     features[26] = float(len(nuclei_areas) / tissue_pixels)
@@ -254,11 +263,13 @@ def compute_patch_descriptor(
     features[34] = float(np.log(np.var(lap) + 1e-6))
     features[35] = safe_mean(grad[tissue])
     features[36] = q(grad[tissue], 0.90)
-    features[37] = float((tissue & (gray < 0.20)).sum() / tissue_pixels)
-    features[38] = float(holes.sum() / tissue_pixels)
-    features[39] = float((tissue & (en > 0.30)).sum() / tissue_pixels)
-    features[40] = float(fold.sum() / tissue_pixels)
-    features[41] = border_fraction(tissue, tissue_pixels, cfg.border_width)
+    features[37] = float(holes.sum() / tissue_pixels)
+    features[38] = float((tissue & (en > 0.30)).sum() / tissue_pixels)
+    features[39] = float(fold.sum() / tissue_pixels)
+    features[40] = border_fraction(tissue, tissue_pixels, cfg.border_width)
+    loc_fracs = np.array([features[29], features[30], features[31]], dtype=np.float32)
+    sorted_loc = np.sort(loc_fracs)[::-1]
+    features[41] = float(sorted_loc[0] - sorted_loc[1]) if sorted_loc.size >= 2 else 0.0
     return features
 
 
