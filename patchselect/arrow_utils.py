@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 from datasets import Image as HFImage
 from datasets import load_dataset
 from PIL import Image
@@ -141,6 +142,39 @@ def normalize_metadata(metadata: dict) -> dict:
         "md5": str(metadata.get("md5") or metadata.get("image_md5") or ""),
         "is_cancer": infer_malignancy(metadata),
     }
+
+
+def metadata_without_large_fields(metadata: dict) -> dict:
+    return {key: value for key, value in metadata.items() if key != "rle_mask"}
+
+
+def decode_rle_mask(rle_mask: object, height: int, width: int) -> np.ndarray | None:
+    if not isinstance(rle_mask, str) or not rle_mask.strip():
+        return None
+
+    tokens = rle_mask.split()
+    if len(tokens) % 2 != 0:
+        return None
+
+    try:
+        starts = np.asarray(tokens[0::2], dtype=np.int64)
+        lengths = np.asarray(tokens[1::2], dtype=np.int64)
+    except ValueError:
+        return None
+
+    if starts.size == 0:
+        return None
+
+    starts = starts - 1
+    ends = starts + lengths
+    total = height * width
+    if np.any(starts < 0) or np.any(ends > total):
+        return None
+
+    flat_mask = np.zeros(total, dtype=np.uint8)
+    for start, end in zip(starts, ends):
+        flat_mask[start:end] = 1
+    return flat_mask.reshape((width, height)).T.astype(bool)
 
 
 def open_rgb_image(bytes_data: bytes) -> Image.Image:

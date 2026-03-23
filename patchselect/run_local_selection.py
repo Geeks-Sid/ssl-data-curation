@@ -28,6 +28,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch_stride", type=int, default=256, help="Patch extraction stride")
     parser.add_argument("--downsample_size", type=int, default=64, help="Descriptor resolution")
     parser.add_argument("--slide_stats_size", type=int, default=512, help="Downsampled size for slide-level normalization")
+    parser.add_argument(
+        "--disable_rle_mask",
+        action="store_true",
+        help="Ignore metadata rle_mask even when present",
+    )
+    parser.add_argument(
+        "--rle_min_fraction",
+        type=float,
+        default=0.02,
+        help="Minimum patch foreground overlap required when rle_mask is available",
+    )
     parser.add_argument("--local_keep_ratio", type=float, default=0.10, help="Fraction of valid patches to keep per image")
     parser.add_argument("--local_keep_min", type=int, default=1, help="Minimum selected patches per image")
     parser.add_argument("--local_keep_max", type=int, default=4, help="Maximum selected patches per image")
@@ -100,6 +111,8 @@ def main() -> None:
         patch_stride=args.patch_stride,
         downsample_size=args.downsample_size,
         slide_stats_size=args.slide_stats_size,
+        use_rle_mask=not args.disable_rle_mask,
+        rle_min_fraction=args.rle_min_fraction,
         local_keep_ratio=args.local_keep_ratio,
         local_keep_min=args.local_keep_min,
         local_keep_max=args.local_keep_max,

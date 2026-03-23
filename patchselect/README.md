@@ -31,6 +31,7 @@ In the current implementation:
 
 - patch-level scoring is **target-label-free**
 - metadata such as `tissue`, `is_cancer`, `gene`, and diagnosis text are used only for balancing or analysis
+- image-level `rle_mask` is used only as a foreground/background pre-filter when present
 - the problem is explicitly **patch-level re-curation after tiling**, not image-level dataset cleaning
 - the objective weights are exposed as CLI and config parameters for reproducible sweeps
 
@@ -39,6 +40,7 @@ In the current implementation:
 1. `local-select`
    - loads Arrow shards one image at a time
    - tiles each image into `256x256` patches
+   - optionally decodes image-level `rle_mask` metadata and skips patches with negligible foreground overlap
    - computes a cheap target-label-free descriptor for every non-empty patch
    - adds neighborhood/interface features from adjacent patches
    - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
@@ -80,6 +82,8 @@ Each retained patch gets a `48D` descriptor. The descriptor is implementation de
 
 Artifacts are treated as penalties or filters, not semantic coverage axes.
 
+If your Arrow metadata contains an image-level `rle_mask`, `patchselect` intersects it with the stain-derived tissue mask and uses it to reject mostly-background patches before descriptor extraction. This is a compute optimization, not a semantic target.
+
 The exact feature names are defined in [constants.py](/D:/FMIHCS/ssl-data-curation/patchselect/constants.py).
 
 ## Example
@@ -91,6 +95,7 @@ Local candidate generation:
    --data_dir Data ^
    --output_dir patchselect/out/local_selection ^
    --split train ^
+   --rle_min_fraction 0.02 ^
    --local_keep_ratio 0.10 ^
    --local_keep_max 4 ^
    --semantic_weight 0.50 ^
@@ -131,6 +136,7 @@ Each row contains:
 - patch coordinates
 - sample and shard identifiers
 - canonical metadata fields
+- optional RLE foreground coverage fields
 - local role assignments
 - objective terms:
   - `objective_score`
