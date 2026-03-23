@@ -10,7 +10,7 @@ class PatchSelectionConfig:
     downsample_size: int = 64
     slide_stats_size: int = 512
     use_rle_mask: bool = True
-    rle_min_fraction: float = 0.02
+    rle_min_fraction: float = 0.75
     tissue_min_fraction: float = 0.05
     od_tissue_threshold: float = 0.12
     sat_tissue_threshold: float = 0.08

@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rle_min_fraction",
         type=float,
-        default=0.02,
+        default=0.75,
         help="Minimum patch foreground overlap required when rle_mask is available",
     )
     parser.add_argument("--local_keep_ratio", type=float, default=0.10, help="Fraction of valid patches to keep per image")

@@ -40,7 +40,7 @@ In the current implementation:
 1. `local-select`
    - loads Arrow shards one image at a time
    - tiles each image into `256x256` patches
-   - optionally decodes image-level `rle_mask` metadata and skips patches with negligible foreground overlap
+   - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
    - computes a cheap target-label-free descriptor for every non-empty patch
    - adds neighborhood/interface features from adjacent patches
    - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
@@ -82,7 +82,7 @@ Each retained patch gets a `48D` descriptor. The descriptor is implementation de
 
 Artifacts are treated as penalties or filters, not semantic coverage axes.
 
-If your Arrow metadata contains an image-level `rle_mask`, `patchselect` intersects it with the stain-derived tissue mask and uses it to reject mostly-background patches before descriptor extraction. This is a compute optimization, not a semantic target.
+If your Arrow metadata contains an image-level `rle_mask`, `patchselect` intersects it with the stain-derived tissue mask and, by default, keeps only patches with at least `75%` foreground overlap before descriptor extraction. This is a compute optimization, not a semantic target.
 
 The exact feature names are defined in [constants.py](/D:/FMIHCS/ssl-data-curation/patchselect/constants.py).
 
@@ -95,7 +95,7 @@ Local candidate generation:
    --data_dir Data ^
    --output_dir patchselect/out/local_selection ^
    --split train ^
-   --rle_min_fraction 0.02 ^
+   --rle_min_fraction 0.75 ^
    --local_keep_ratio 0.10 ^
    --local_keep_max 4 ^
    --semantic_weight 0.50 ^
