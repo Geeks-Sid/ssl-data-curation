@@ -41,7 +41,8 @@ In the current implementation:
    - loads Arrow shards one image at a time
    - tiles each image into `256x256` patches
    - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
-   - computes a cheap target-label-free descriptor for every non-empty patch
+   - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
+   - computes slide-level stain normalization statistics on the full source image by default
    - adds neighborhood/interface features from adjacent patches
    - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
    - keeps a role-based local coreset per image:
@@ -61,6 +62,8 @@ In the current implementation:
 ## Descriptor
 
 Each retained patch gets a `48D` descriptor. The descriptor is implementation detail, not the method claim.
+
+By default, the patch descriptor runs on the original patch resolution, and slide-level stain normalization runs on the full source image. `--downsample_size` and `--slide_stats_size` are now optional and should be used only if you explicitly want faster lower-resolution ablations.
 
 - `42D` base descriptor
   - stain statistics

@@ -154,10 +154,12 @@ def compute_slide_stats(
     cfg: PatchSelectionConfig,
     foreground_mask: np.ndarray | None = None,
 ) -> SlideStats:
-    slide_rgb = resize_rgb(rgb, cfg.slide_stats_size)
-    slide_foreground = None
-    if foreground_mask is not None:
-        slide_foreground = resize_mask(foreground_mask, cfg.slide_stats_size)
+    if cfg.slide_stats_size is not None:
+        slide_rgb = resize_rgb(rgb, cfg.slide_stats_size)
+        slide_foreground = resize_mask(foreground_mask, cfg.slide_stats_size) if foreground_mask is not None else None
+    else:
+        slide_rgb = rgb
+        slide_foreground = foreground_mask
     hed = rgb_to_hed(slide_rgb)
     h = np.clip(hed[..., 0], 0.0, None)
     d = np.clip(hed[..., 2], 0.0, None)
@@ -219,10 +221,11 @@ def compute_patch_descriptor(
     cfg: PatchSelectionConfig,
     foreground_mask: np.ndarray | None = None,
 ) -> np.ndarray | None:
-    patch_rgb = resize_rgb(patch_rgb, cfg.downsample_size)
+    if cfg.downsample_size is not None:
+        patch_rgb = resize_rgb(patch_rgb, cfg.downsample_size)
     patch_foreground = None
     if foreground_mask is not None:
-        patch_foreground = resize_mask(foreground_mask, cfg.downsample_size)
+        patch_foreground = resize_mask(foreground_mask, cfg.downsample_size) if cfg.downsample_size is not None else foreground_mask
     rgb = patch_rgb.astype(np.float32)
     hed = rgb_to_hed(rgb)
     h = np.clip(hed[..., 0], 0.0, None)

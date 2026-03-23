@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 class PatchSelectionConfig:
     patch_size: int = 256
     patch_stride: int = 256
-    downsample_size: int = 64
-    slide_stats_size: int = 512
+    downsample_size: int | None = None
+    slide_stats_size: int | None = None
     use_rle_mask: bool = True
     rle_min_fraction: float = 0.75
     tissue_min_fraction: float = 0.05

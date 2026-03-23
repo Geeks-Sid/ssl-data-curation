@@ -26,8 +26,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit_images", type=int, default=None, help="Optional maximum number of images to process")
     parser.add_argument("--patch_size", type=int, default=256, help="Patch size before descriptor downsampling")
     parser.add_argument("--patch_stride", type=int, default=256, help="Patch extraction stride")
-    parser.add_argument("--downsample_size", type=int, default=64, help="Descriptor resolution")
-    parser.add_argument("--slide_stats_size", type=int, default=512, help="Downsampled size for slide-level normalization")
+    parser.add_argument(
+        "--downsample_size",
+        type=int,
+        default=None,
+        help="Optional descriptor resolution; defaults to patch_size for full-resolution patch descriptors",
+    )
+    parser.add_argument(
+        "--slide_stats_size",
+        type=int,
+        default=None,
+        help="Optional slide-level stain-stat resolution; defaults to the full image",
+    )
     parser.add_argument(
         "--disable_rle_mask",
         action="store_true",
