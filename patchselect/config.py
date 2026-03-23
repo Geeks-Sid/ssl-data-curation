@@ -1,0 +1,57 @@
+"""Configuration dataclasses for patch selection."""
+
+from dataclasses import dataclass, field
+
+
+@dataclass(slots=True)
+class PatchSelectionConfig:
+    patch_size: int = 256
+    patch_stride: int = 256
+    downsample_size: int = 64
+    slide_stats_size: int = 512
+    tissue_min_fraction: float = 0.05
+    od_tissue_threshold: float = 0.12
+    sat_tissue_threshold: float = 0.08
+    value_tissue_threshold: float = 0.95
+    nuclei_h_threshold: float = 0.35
+    dab_positive_threshold: float = 0.30
+    local_keep_ratio: float = 0.10
+    local_keep_min: int = 1
+    local_keep_max: int = 4
+    min_component_size: int = 16
+    border_width: int = 4
+    utility_fps_weight: float = 0.15
+    image_format: str = "jpg"
+    jpeg_quality: int = 95
+
+
+@dataclass(slots=True)
+class GlobalSelectionConfig:
+    target_size: int
+    bin_columns: tuple[str, ...] = ("tissue", "cell_type", "state_bin")
+    bin_alpha: float = 0.5
+    utility_column: str = "utility"
+    partition_dir_name: str = "bin_partitions"
+    per_bin_min_quota: int = 0
+    metadata_columns: tuple[str, ...] = field(
+        default_factory=lambda: (
+            "sample_id",
+            "source_shard",
+            "source_index",
+            "patch_index",
+            "patch_x",
+            "patch_y",
+            "grid_row",
+            "grid_col",
+            "gene",
+            "tissue",
+            "cell_type",
+            "diagnosis",
+            "is_cancer",
+            "utility",
+            "quality_score",
+            "interface_score",
+            "rarity_score",
+            "state_bin",
+        )
+    )

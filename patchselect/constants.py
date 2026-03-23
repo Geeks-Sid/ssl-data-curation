@@ -1,0 +1,77 @@
+"""Constants shared across the patch selection pipeline."""
+
+BASE_FEATURE_NAMES = [
+    "tissue_frac",
+    "odsum_mean",
+    "gray_mean",
+    "sat_mean",
+    "h_mean",
+    "h_std",
+    "h_q10",
+    "h_q50",
+    "h_q90",
+    "d_mean",
+    "d_std",
+    "d_q10",
+    "d_q50",
+    "d_q90",
+    "e_mean",
+    "e_q90",
+    "d_frac_015",
+    "d_frac_030",
+    "d_frac_050",
+    "d_frac_070",
+    "d_band_015_030",
+    "d_band_030_050",
+    "d_band_050_070",
+    "d_band_070_100",
+    "d_pos_mean",
+    "nuclei_frac",
+    "nuclei_count_density",
+    "nuclei_area_mean",
+    "nuclei_area_cv",
+    "dab_in_nuc_frac",
+    "dab_ring_frac",
+    "dab_extra_frac",
+    "dab_cc_density",
+    "dab_edge_to_area",
+    "log_lap_var",
+    "grad_mean",
+    "grad_p90",
+    "dark_frac",
+    "hole_frac",
+    "unexpected_color_frac",
+    "fold_frac",
+    "border_tissue_frac",
+]
+
+NEIGHBOR_FEATURE_NAMES = [
+    "neigh_sem_l1_mean",
+    "neigh_sem_l1_max",
+    "neigh_d_mean_diff",
+    "neigh_posfrac_diff",
+    "neigh_nuc_frac_diff",
+    "neigh_state_change_frac",
+]
+
+FEATURE_NAMES = BASE_FEATURE_NAMES + NEIGHBOR_FEATURE_NAMES
+
+SEMANTIC_FEATURE_NAMES = [
+    "h_mean",
+    "h_q10",
+    "h_q90",
+    "d_mean",
+    "d_q10",
+    "d_q90",
+    "d_frac_015",
+    "d_frac_030",
+    "d_frac_050",
+    "d_frac_070",
+    "d_pos_mean",
+    "nuclei_frac",
+    "dab_in_nuc_frac",
+    "dab_ring_frac",
+    "dab_extra_frac",
+]
+
+SEMANTIC_FEATURE_INDICES = [BASE_FEATURE_NAMES.index(name) for name in SEMANTIC_FEATURE_NAMES]

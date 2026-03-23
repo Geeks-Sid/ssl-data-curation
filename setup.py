@@ -10,4 +10,12 @@ from setuptools import find_packages, setup
 setup(
     name="ssl_data_curation",
     packages=find_packages(),
+    entry_points={
+        "console_scripts": [
+            "patchselect=patchselect.__main__:main",
+            "patchselect-export=patchselect.export_images:main",
+            "patchselect-local=patchselect.run_local_selection:main",
+            "patchselect-global=patchselect.run_global_selection:main",
+        ]
+    },
 )
