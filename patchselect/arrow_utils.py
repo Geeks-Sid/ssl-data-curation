@@ -36,7 +36,11 @@ def discover_arrow_files(data_dir: Path, split: str = "all") -> list[Path]:
     if keywords is None:
         raise ValueError(f"Unsupported split={split!r}")
 
-    selected = [path for path in files if any(keyword in path.name.lower() for keyword in keywords)]
+    selected = [
+        path
+        for path in files
+        if any(keyword in path.name.lower() for keyword in keywords)
+    ]
     if not selected:
         raise FileNotFoundError(
             f"No .arrow files matching split={split!r} found in {data_dir}"
@@ -127,8 +131,18 @@ def infer_malignancy(metadata: dict) -> int | None:
 
 def normalize_metadata(metadata: dict) -> dict:
     return {
-        "gene": str(metadata.get("gene") or metadata.get("marker") or metadata.get("antibody") or ""),
-        "tissue": str(metadata.get("tissue") or metadata.get("organ") or metadata.get("tissue_name") or ""),
+        "gene": str(
+            metadata.get("gene")
+            or metadata.get("marker")
+            or metadata.get("antibody")
+            or ""
+        ),
+        "tissue": str(
+            metadata.get("tissue")
+            or metadata.get("organ")
+            or metadata.get("tissue_name")
+            or ""
+        ),
         "cell_type": str(
             metadata.get("cell_type")
             or metadata.get("celltype")
@@ -211,6 +225,13 @@ def resolve_collision(path: Path, counts: Counter[str]) -> Path:
 
 
 def common_export_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--data_dir", default="Data", help="Directory containing .arrow shards")
-    parser.add_argument("--limit", type=int, default=None, help="Optional maximum number of images to process")
+    parser.add_argument(
+        "--data_dir", default="Data", help="Directory containing .arrow shards"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional maximum number of images to process",
+    )
     return parser

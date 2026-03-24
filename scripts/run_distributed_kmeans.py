@@ -23,6 +23,7 @@ from src.utils import get_last_valid_checkpoint, setup_logging
 
 logger = logging.getLogger("hkmeans")
 
+
 def check_and_load_npy(load_path, allow_pickle=False, data_name=None):
     if load_path.exists():
         if data_name is not None:
@@ -111,9 +112,7 @@ def main(args):
 
         # Compute centroids
         centroids = check_and_load_npy(
-            Path(step_dir, "centroids.npy"),
-            allow_pickle=False,
-            data_name="centroids"
+            Path(step_dir, "centroids.npy"), allow_pickle=False, data_name="centroids"
         )
         if centroids is not None:
             centroids = torch.tensor(centroids, device="cuda", dtype=args.dtype)
@@ -132,50 +131,35 @@ def main(args):
                 kmpp_checkpoint_period=args.checkpoint_period,
                 high_precision=args.high_precision,
             )
-        check_and_save(
-            Path(step_dir, "centroids.npy"),
-            centroids.cpu().numpy()
-        )
+        check_and_save(Path(step_dir, "centroids.npy"), centroids.cpu().numpy())
 
         # Compute cluster_assignment
         cluster_assignment = check_and_load_npy(
             Path(step_dir, "cluster_assignment.npy"),
             allow_pickle=False,
-            data_name="cluster_assignment"
+            data_name="cluster_assignment",
         )
         if cluster_assignment is None:
             logger.info("Assign points to clusters")
             cluster_assignment = (
                 dkmg.distributed_assign_clusters(
-                    X_ori,
-                    Xi_ori,
-                    centroids,
-                    args.chunk_size,
-                    verbose=True
+                    X_ori, Xi_ori, centroids, args.chunk_size, verbose=True
                 )
                 .cpu()
                 .numpy()
             )
-        check_and_save(
-            Path(step_dir, "cluster_assignment.npy"),
-            cluster_assignment
-        )
+        check_and_save(Path(step_dir, "cluster_assignment.npy"), cluster_assignment)
 
         # Compute clusters
         clusters = check_and_load_npy(
-            Path(step_dir, "clusters.npy"),
-            allow_pickle=True,
-            data_name="clusters"
+            Path(step_dir, "clusters.npy"), allow_pickle=True, data_name="clusters"
         )
         if clusters is None:
             logger.info("Create clusters from cluster_assignment")
             clusters = kmg.create_clusters_from_cluster_assignment(
                 cluster_assignment, args.n_clusters
             )
-        check_and_save(
-            Path(step_dir, "clusters.npy"),
-            clusters
-        )
+        check_and_save(Path(step_dir, "clusters.npy"), clusters)
 
         if not Path(step_dir, "sorted_clusters.npy").exists():
             centroids = centroids.cpu().numpy()
@@ -232,11 +216,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--high_precision", type=str, default="float32")
     parser.add_argument("--checkpoint_period", type=int, default=1000)
-    parser.add_argument(
-        "--sort_cluster_checkpoint_period",
-        type=int,
-        default=-1
-    )
+    parser.add_argument("--sort_cluster_checkpoint_period", type=int, default=-1)
     parser.add_argument("--exp_dir", type=str, default="tmp")
     parser.add_argument("--n_iters", type=int, default=10)
     parser.add_argument("--use_torchrun", action="store_true")

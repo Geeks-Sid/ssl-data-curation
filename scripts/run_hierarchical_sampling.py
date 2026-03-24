@@ -21,17 +21,14 @@ if __name__ == "__main__":
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--clustering_path", "-clus", type=str, required=True)
     parser.add_argument(
-        "--target_size",
-        type=int,
-        required=True,
-        help="Target size of the sampled set"
+        "--target_size", type=int, required=True, help="Target size of the sampled set"
     )
     parser.add_argument(
         "--multiplier",
         "-m",
         type=int,
         default=1,
-        help="Maximum number of times an image is selected"
+        help="Maximum number of times an image is selected",
     )
     parser.add_argument(
         "--sampling_strategy",
@@ -74,8 +71,7 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
 
     cl = HierarchicalCluster.from_file(
-        cluster_path=args.clustering_path,
-        cluster_fname=args.cluster_fname
+        cluster_path=args.clustering_path, cluster_fname=args.cluster_fname
     )
 
     sampled_indices = hierarchical_sampling(
@@ -100,8 +96,8 @@ if __name__ == "__main__":
     save_indices_path = Path(
         args.clustering_path,
         args.save_dir_name,
-        f'{cl.n_levels}{args.sampling_strategy}_mul{args.multiplier}_'
-        f'{args.target_size}_balanced_selection.npy'
+        f"{cl.n_levels}{args.sampling_strategy}_mul{args.multiplier}_"
+        f"{args.target_size}_balanced_selection.npy",
     )
     if len(args.name_suffix) > 0:
         save_indices_path = Path(

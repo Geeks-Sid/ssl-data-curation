@@ -13,7 +13,9 @@ def write_dataframe_part(frame: pd.DataFrame, path: Path) -> None:
     frame.to_parquet(path, index=False)
 
 
-def write_rows_part(rows: list[dict], output_dir: Path, prefix: str, part_index: int) -> int:
+def write_rows_part(
+    rows: list[dict], output_dir: Path, prefix: str, part_index: int
+) -> int:
     if not rows:
         return part_index
     frame = pd.DataFrame(rows)

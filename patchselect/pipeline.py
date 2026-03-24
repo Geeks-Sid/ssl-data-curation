@@ -8,12 +8,24 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from patchselect.arrow_utils import decode_rle_mask, metadata_without_large_fields, normalize_metadata, slugify
+from patchselect.arrow_utils import (
+    decode_rle_mask,
+    metadata_without_large_fields,
+    normalize_metadata,
+    slugify,
+)
 from patchselect.config import PatchSelectionConfig
 from patchselect.constants import FEATURE_NAMES
-from patchselect.descriptor_backend import compute_patch_descriptors_for_backend, compute_slide_stats_for_backend
+from patchselect.descriptor_backend import (
+    compute_patch_descriptors_for_backend,
+    compute_slide_stats_for_backend,
+)
 from patchselect.descriptors import tile_starts
-from patchselect.selection import add_neighborhood_features, compute_local_scores, role_based_local_selection
+from patchselect.selection import (
+    add_neighborhood_features,
+    compute_local_scores,
+    role_based_local_selection,
+)
 
 
 def image_to_rgb_array(image: Image.Image) -> np.ndarray:
@@ -66,8 +78,12 @@ def select_patches_from_image(
             patch_rle_mask = None
             patch_rle_fraction = None
             if rle_mask is not None:
-                patch_rle_mask = rle_mask[top : top + cfg.patch_size, left : left + cfg.patch_size]
-                patch_rle_fraction = float(patch_rle_mask.mean()) if patch_rle_mask.size else 0.0
+                patch_rle_mask = rle_mask[
+                    top : top + cfg.patch_size, left : left + cfg.patch_size
+                ]
+                patch_rle_fraction = (
+                    float(patch_rle_mask.mean()) if patch_rle_mask.size else 0.0
+                )
                 if patch_rle_fraction < cfg.rle_min_fraction:
                     continue
             candidate_patches.append(patch)
@@ -178,7 +194,9 @@ def select_patches_from_image(
     return selected_rows, selected_patches
 
 
-def save_selected_patch(patch_rgb: np.ndarray, record: dict, output_dir: Path, cfg: PatchSelectionConfig) -> Path:
+def save_selected_patch(
+    patch_rgb: np.ndarray, record: dict, output_dir: Path, cfg: PatchSelectionConfig
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = build_patch_filename(record, cfg.image_format)
     out_path = output_dir / filename

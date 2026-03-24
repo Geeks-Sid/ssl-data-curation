@@ -77,7 +77,9 @@ SEMANTIC_FEATURE_NAMES = [
     "compartment_margin",
 ]
 
-SEMANTIC_FEATURE_INDICES = [BASE_FEATURE_NAMES.index(name) for name in SEMANTIC_FEATURE_NAMES]
+SEMANTIC_FEATURE_INDICES = [
+    BASE_FEATURE_NAMES.index(name) for name in SEMANTIC_FEATURE_NAMES
+]
 
 ROLE_NAMES = (
     "prototype",

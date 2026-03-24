@@ -16,6 +16,7 @@ from src.clusters import HierarchicalCluster
 
 logger = logging.getLogger("hkmeans")
 
+
 def random_selection(clusters, valid_clusters, num_per_cluster):
     """
     Parameters:
@@ -107,14 +108,16 @@ def find_subcluster_target_size(
         arr = subcluster_sizes * multiplier
     else:
         arr = np.array(subcluster_sizes) * multiplier
-    best_cut_left =  _find_best_cut_left(arr, target_size)
+    best_cut_left = _find_best_cut_left(arr, target_size)
     if best_cut_left == np.max(arr):
         return arr
     else:
         subcluster_target_sizes = np.minimum(best_cut_left, arr)
         remainder = target_size - subcluster_target_sizes.sum()
         candidates = np.where(arr > best_cut_left)[0]
-        subcluster_target_sizes[np.random.choice(candidates, remainder, replace=False)] = best_cut_left + 1
+        subcluster_target_sizes[
+            np.random.choice(candidates, remainder, replace=False)
+        ] = (best_cut_left + 1)
         assert subcluster_target_sizes.sum() == target_size
         assert np.all(subcluster_target_sizes <= arr)
         return subcluster_target_sizes
@@ -150,7 +153,9 @@ def recursive_hierarchical_sampling(
             elif sampling_strategy == "c":  # "closest"
                 remaining_samples = current_cluster[:remaining_target]
             else:
-                raise ValueError(f"sampling_strategy={sampling_strategy} is not supported")
+                raise ValueError(
+                    f"sampling_strategy={sampling_strategy} is not supported"
+                )
             return np.concatenate([replicates, remaining_samples])
     else:
         subcl_indices = clusters.clusters[level][cl_index]

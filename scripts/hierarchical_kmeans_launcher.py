@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 ROOT = Path().resolve()
 MEMORY_LIMIT = 2e8
 
+
 def write_main_script(cfg, level_dir, level_id):
     """
     Write slurm script for a level of k-means.
@@ -30,7 +31,7 @@ def write_main_script(cfg, level_dir, level_id):
 
     with open(Path(level_dir, "slurm_script.s"), "w") as f:
         f.write(
-f"""#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 
 #SBATCH --requeue
 #SBATCH --nodes={cfg.nnodes[level_id-1]}
@@ -48,7 +49,8 @@ f"""#!/usr/bin/env bash
         if cfg.slurm_partition is not None:
             f.write(f"#SBATCH --partition={cfg.slurm_partition}\n")
 
-        f.write(f"""
+        f.write(
+            f"""
 EXPDIR={save_dir}
 cd {ROOT}
 
@@ -74,7 +76,7 @@ srun --unbuffered --output="$EXPDIR"/logs/%j_%t_log.out --error="$EXPDIR"/logs/%
 
     with open(Path(level_dir, "local_script.sh"), "w") as f:
         f.write(
-f"""#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 EXPDIR={save_dir}
 cd {ROOT}
 
@@ -113,7 +115,7 @@ def write_split_clusters_script(cfg, level_dir, level_id):
 
     with open(Path(level_dir, "slurm_split_clusters_script.s"), "w") as f:
         f.write(
-f"""#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 
 #SBATCH --requeue
 #SBATCH --nodes={cfg.nnodes[level_id-1]}
@@ -131,7 +133,8 @@ f"""#!/usr/bin/env bash
         if cfg.slurm_partition is not None:
             f.write(f"#SBATCH --partition={cfg.slurm_partition}\n")
 
-        f.write(f"""
+        f.write(
+            f"""
 EXPDIR={level_dir}
 cd {ROOT}
 
@@ -153,7 +156,7 @@ srun --unbuffered --output="$EXPDIR"/logs/%j_%t_log.out --error="$EXPDIR"/logs/%
 
     with open(Path(level_dir, "local_split_clusters_script.sh"), "w") as f:
         f.write(
-f"""#!/usr/bin/env bash
+            f"""#!/usr/bin/env bash
 
 EXPDIR={level_dir}
 cd {ROOT}
@@ -220,6 +223,7 @@ def write_launcher(exp_dir, n_levels, n_splits):
                 )
                 f.write('echo "Level {level_id}, split clusters: job $ID"\n')
 
+
 def write_local_launcher(exp_dir, n_levels, n_splits):
     """
     Write bash script to launch slurm scripts in all levels.
@@ -230,7 +234,9 @@ def write_local_launcher(exp_dir, n_levels, n_splits):
         for level_id in range(1, n_levels + 1):
             f.write(f"bash {str(exp_dir)}/level{level_id}/local_script.sh\n")
             if n_splits[level_id - 1] > 1:
-                f.write(f"bash {str(exp_dir)}/level{level_id}/local_split_clusters_script.sh\n")
+                f.write(
+                    f"bash {str(exp_dir)}/level{level_id}/local_split_clusters_script.sh\n"
+                )
 
 
 if __name__ == "__main__":

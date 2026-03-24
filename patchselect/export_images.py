@@ -23,7 +23,11 @@ def parse_args() -> argparse.Namespace:
         )
     )
     common_export_args(parser)
-    parser.add_argument("--output_dir", default="out/exported_images", help="Directory where images are written")
+    parser.add_argument(
+        "--output_dir",
+        default="out/exported_images",
+        help="Directory where images are written",
+    )
     parser.add_argument(
         "--split",
         default="eval",

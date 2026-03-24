@@ -31,6 +31,7 @@ from .utils import (
 
 logger = logging.getLogger("hkmeans")
 
+
 class ExtendedNumpyMemMap(object):
     """
     Class representing an arbitrary slice of a memmap to a numpy array or an array
@@ -202,7 +203,7 @@ def select_best_candidate(
 ):
     """
     The selection sub-procedure of kmeans++ initialization.
-    Given a list of candidates to select as the next centroid, it find 
+    Given a list of candidates to select as the next centroid, it find
     the candidate that would result in the smallest partial kmeans objective.
 
     Parameters:
@@ -511,7 +512,9 @@ def distributed_assign_clusters(X, Xi, centroids, chunk_size, verbose=False):
 
     """
 
-    cluster_assignment = kmg.assign_clusters(centroids, Xi, "l2", chunk_size, verbose=verbose)
+    cluster_assignment = kmg.assign_clusters(
+        centroids, Xi, "l2", chunk_size, verbose=verbose
+    )
     cluster_assignment = gather_tensor(cluster_assignment, do_all_gather=True)
     return cluster_assignment
 
@@ -725,16 +728,12 @@ def distributed_sort_cluster_by_distance(
     part_indices = get_part_indices(n_clusters, get_global_size())
     rank = get_global_rank()
 
-    if checkpoint_period > 0 and Path(
-        save_dir,
-        f"sorted_clusters_checkpoint_{rank}.npy"
-    ).exists():
+    if (
+        checkpoint_period > 0
+        and Path(save_dir, f"sorted_clusters_checkpoint_{rank}.npy").exists()
+    ):
         cluster_data = np.load(
-            Path(
-                save_dir,
-                f"sorted_clusters_checkpoint_{rank}.npy"
-            ),
-            allow_pickle=True
+            Path(save_dir, f"sorted_clusters_checkpoint_{rank}.npy"), allow_pickle=True
         ).item()
         sorted_clusters = cluster_data["sorted_clusters"]
         prev_item = cluster_data["prev_item"]
@@ -751,9 +750,7 @@ def distributed_sort_cluster_by_distance(
         point_indices = np.sort(clusters[cluster_idx])
         point_feats = torch.tensor(X[point_indices], device=device, dtype=dtype)
         _centroid = torch.tensor(
-            centroids[cluster_idx],
-            device=device,
-            dtype=dtype
+            centroids[cluster_idx], device=device, dtype=dtype
         ).reshape(1, n_dim)
 
         dist_to_centroid = torch.cdist(point_feats, _centroid).flatten()
@@ -762,20 +759,15 @@ def distributed_sort_cluster_by_distance(
         )
         del point_feats
 
-        if(
-            (
-                checkpoint_period > 0 and
-                cluster_idx % checkpoint_period == 0
-            ) or
-            cluster_idx == part_indices[rank + 1] - 1
-        ):
-            logger.info(f"Saving checkpoint to {save_dir}/sorted_clusters_checkpoint_{rank}.npy")
+        if (
+            checkpoint_period > 0 and cluster_idx % checkpoint_period == 0
+        ) or cluster_idx == part_indices[rank + 1] - 1:
+            logger.info(
+                f"Saving checkpoint to {save_dir}/sorted_clusters_checkpoint_{rank}.npy"
+            )
             np.save(
                 Path(save_dir, f"sorted_clusters_checkpoint_{rank}.npy"),
-                {
-                    "sorted_clusters": sorted_clusters,
-                    "prev_item": cluster_idx
-                }
+                {"sorted_clusters": sorted_clusters, "prev_item": cluster_idx},
             )
     synchronize()
     if is_main_process():
@@ -791,19 +783,15 @@ def distributed_sort_cluster_by_distance(
                 Path(save_dir, f"sorted_clusters_checkpoint_{i}.npy"),
                 allow_pickle=True,
             ).item()
-            assert rank_data['prev_item'] == part_indices[i + 1] - 1
+            assert rank_data["prev_item"] == part_indices[i + 1] - 1
             sorted_clusters += rank_data["sorted_clusters"]
         sorted_clusters = np.array(sorted_clusters, dtype=object)
-        np.save(
-            Path(save_dir, "sorted_clusters.npy"),
-            sorted_clusters
-        )
+        np.save(Path(save_dir, "sorted_clusters.npy"), sorted_clusters)
         for i in range(get_global_size()):
-            Path(save_dir, f"sorted_clusters_checkpoint_{i}.npy").unlink(missing_ok=True)
+            Path(save_dir, f"sorted_clusters_checkpoint_{i}.npy").unlink(
+                missing_ok=True
+            )
 
     synchronize()
-    sorted_clusters = np.load(
-        Path(save_dir, "sorted_clusters.npy"),
-        allow_pickle=True
-    )
+    sorted_clusters = np.load(Path(save_dir, "sorted_clusters.npy"), allow_pickle=True)
     return sorted_clusters

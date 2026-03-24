@@ -10,25 +10,45 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from patchselect.arrow_utils import discover_arrow_files, extract_custom_metadata, load_arrow_shard, open_rgb_image
+from patchselect.arrow_utils import (
+    discover_arrow_files,
+    extract_custom_metadata,
+    load_arrow_shard,
+    open_rgb_image,
+)
 from patchselect.config import PatchSelectionConfig
-from patchselect.descriptor_backend import available_descriptor_backends, backend_is_available
+from patchselect.descriptor_backend import (
+    available_descriptor_backends,
+    backend_is_available,
+)
 from patchselect.io_utils import write_json
 from patchselect.pipeline import select_patches_from_image
-from patchselect.run_local_selection import build_task, parse_gpu_ids, process_chunk_with_retries
+from patchselect.run_local_selection import (
+    build_task,
+    parse_gpu_ids,
+    process_chunk_with_retries,
+)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark CPU vs cuCIM descriptor backends.")
-    parser.add_argument("--data_dir", default="Data", help="Directory containing .arrow shards")
+    parser = argparse.ArgumentParser(
+        description="Benchmark CPU vs cuCIM descriptor backends."
+    )
+    parser.add_argument(
+        "--data_dir", default="Data", help="Directory containing .arrow shards"
+    )
     parser.add_argument(
         "--split",
         default="train",
         choices=("all", "train", "valid", "test", "eval"),
         help="Which shard split to sample",
     )
-    parser.add_argument("--limit_images", type=int, default=8, help="Number of benchmark images")
-    parser.add_argument("--warmup_images", type=int, default=1, help="Warmup images per backend")
+    parser.add_argument(
+        "--limit_images", type=int, default=8, help="Number of benchmark images"
+    )
+    parser.add_argument(
+        "--warmup_images", type=int, default=1, help="Warmup images per backend"
+    )
     parser.add_argument(
         "--backend",
         default="both",
@@ -41,25 +61,49 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Generate synthetic benchmark images instead of reading Arrow shards",
     )
-    parser.add_argument("--synthetic_size", type=int, default=3000, help="Side length for synthetic images")
+    parser.add_argument(
+        "--synthetic_size",
+        type=int,
+        default=3000,
+        help="Side length for synthetic images",
+    )
     parser.add_argument("--patch_size", type=int, default=256, help="Patch size")
     parser.add_argument("--patch_stride", type=int, default=256, help="Patch stride")
-    parser.add_argument("--num_workers", type=int, default=1, help="Worker processes for benchmark execution")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Worker processes for benchmark execution",
+    )
     parser.add_argument(
         "--auto_reduce_gpu_workers",
         action="store_true",
         help="Retry cucim benchmark chunks with fewer workers after GPU OOM",
     )
-    parser.add_argument("--gpu_ids", default=None, help="Comma-separated GPU ids for cucim worker tasks")
-    parser.add_argument("--downsample_size", type=int, default=None, help="Optional patch descriptor downsample size")
+    parser.add_argument(
+        "--gpu_ids", default=None, help="Comma-separated GPU ids for cucim worker tasks"
+    )
+    parser.add_argument(
+        "--downsample_size",
+        type=int,
+        default=None,
+        help="Optional patch descriptor downsample size",
+    )
     parser.add_argument(
         "--slide_stats_size",
         type=int,
         default=None,
         help="Optional slide-level stain-stat resolution",
     )
-    parser.add_argument("--rle_min_fraction", type=float, default=0.75, help="Minimum RLE foreground overlap")
-    parser.add_argument("--output_json", default=None, help="Optional JSON file for benchmark results")
+    parser.add_argument(
+        "--rle_min_fraction",
+        type=float,
+        default=0.75,
+        help="Minimum RLE foreground overlap",
+    )
+    parser.add_argument(
+        "--output_json", default=None, help="Optional JSON file for benchmark results"
+    )
     return parser.parse_args()
 
 
@@ -80,7 +124,9 @@ def image_to_jpeg_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
-def build_synthetic_samples(count: int, size: int) -> list[tuple[bytes, str, dict, str, int]]:
+def build_synthetic_samples(
+    count: int, size: int
+) -> list[tuple[bytes, str, dict, str, int]]:
     rng = np.random.default_rng(7)
     samples: list[tuple[bytes, str, dict, str, int]] = []
     for index in range(count):
@@ -103,11 +149,21 @@ def build_synthetic_samples(count: int, size: int) -> list[tuple[bytes, str, dic
             "cell_type": "synthetic",
             "diagnosis": "synthetic benchmark image",
         }
-        samples.append((image_to_jpeg_bytes(image), f"synthetic-{index}", metadata, "synthetic", index))
+        samples.append(
+            (
+                image_to_jpeg_bytes(image),
+                f"synthetic-{index}",
+                metadata,
+                "synthetic",
+                index,
+            )
+        )
     return samples
 
 
-def load_arrow_samples(data_dir: Path, split: str, limit_images: int) -> list[tuple[bytes, str, dict, str, int]]:
+def load_arrow_samples(
+    data_dir: Path, split: str, limit_images: int
+) -> list[tuple[bytes, str, dict, str, int]]:
     files = discover_arrow_files(data_dir, split=split)
     samples: list[tuple[bytes, str, dict, str, int]] = []
     for shard_path in files:
@@ -118,15 +174,22 @@ def load_arrow_samples(data_dir: Path, split: str, limit_images: int) -> list[tu
                 continue
             metadata = extract_custom_metadata(item)
             sample_id = str(metadata.get("md5") or f"{shard_path.stem}:{source_index}")
-            samples.append((bytes_data, sample_id, metadata, str(shard_path), source_index))
+            samples.append(
+                (bytes_data, sample_id, metadata, str(shard_path), source_index)
+            )
             if len(samples) >= limit_images:
                 return samples
     return samples
 
 
-def load_samples(args: argparse.Namespace) -> tuple[list[tuple[bytes, str, dict, str, int]], str]:
+def load_samples(
+    args: argparse.Namespace,
+) -> tuple[list[tuple[bytes, str, dict, str, int]], str]:
     if args.synthetic_images > 0:
-        return build_synthetic_samples(args.synthetic_images, args.synthetic_size), "synthetic"
+        return (
+            build_synthetic_samples(args.synthetic_images, args.synthetic_size),
+            "synthetic",
+        )
     try:
         samples = load_arrow_samples(Path(args.data_dir), args.split, args.limit_images)
     except FileNotFoundError:
@@ -134,7 +197,10 @@ def load_samples(args: argparse.Namespace) -> tuple[list[tuple[bytes, str, dict,
     if samples:
         return samples, "arrow"
     fallback_count = max(args.limit_images, 4)
-    return build_synthetic_samples(fallback_count, args.synthetic_size), "synthetic_fallback"
+    return (
+        build_synthetic_samples(fallback_count, args.synthetic_size),
+        "synthetic_fallback",
+    )
 
 
 def run_backend(
@@ -161,7 +227,9 @@ def run_backend(
 
     warmup = min(args.warmup_images, len(samples))
     try:
-        for bytes_data, sample_id, metadata, source_shard, source_index in samples[:warmup]:
+        for bytes_data, sample_id, metadata, source_shard, source_index in samples[
+            :warmup
+        ]:
             image = open_rgb_image(bytes_data)
             select_patches_from_image(
                 image=image,
@@ -188,7 +256,13 @@ def run_backend(
         if args.num_workers > 1:
             gpu_ids = parse_gpu_ids(args.gpu_ids) if backend == "cucim" else []
             tasks = []
-            for task_index, (bytes_data, sample_id, metadata, source_shard, source_index) in enumerate(measured):
+            for task_index, (
+                bytes_data,
+                sample_id,
+                metadata,
+                source_shard,
+                source_index,
+            ) in enumerate(measured):
                 gpu_id = gpu_ids[task_index % len(gpu_ids)] if gpu_ids else None
                 tasks.append(
                     build_task(
@@ -259,9 +333,13 @@ def main() -> None:
     results = [run_backend(backend, samples, args) for backend in backends]
 
     speedup = None
-    by_name = {result["backend"]: result for result in results if "total_seconds" in result}
+    by_name = {
+        result["backend"]: result for result in results if "total_seconds" in result
+    }
     if "cpu" in by_name and "cucim" in by_name:
-        speedup = by_name["cpu"]["total_seconds"] / max(by_name["cucim"]["total_seconds"], 1e-6)
+        speedup = by_name["cpu"]["total_seconds"] / max(
+            by_name["cucim"]["total_seconds"], 1e-6
+        )
 
     payload = {
         "sample_source": source,

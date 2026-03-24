@@ -110,9 +110,9 @@ def split_clusters(
             small_clusters += _small_clusters
 
             del point_feats
-        if(
-            cluster_idx % checkpoint_period == 0 or
-            cluster_idx == part_indices[rank + 1] - 1
+        if (
+            cluster_idx % checkpoint_period == 0
+            or cluster_idx == part_indices[rank + 1] - 1
         ):
             np.save(
                 Path(save_path, f"split_checkpoint_{rank}.npy"),
@@ -134,13 +134,12 @@ def split_clusters(
             bar_format="{l_bar}{bar}{r_bar}",
         ):
             split_data = np.load(
-                Path(save_path, f"split_checkpoint_{i}.npy"),
-                allow_pickle=True
+                Path(save_path, f"split_checkpoint_{i}.npy"), allow_pickle=True
             ).item()
             small_centroids = np.concatenate(split_data["small_centroids"])
             small_clusters = split_data["small_clusters"]
-            assert(
-                len(small_centroids) == len(small_clusters)
+            assert len(small_centroids) == len(
+                small_clusters
             ), f"Inconsistent shape in split_checkpoint_{i}.npy"
             assert split_data["last_index"] == part_indices[i + 1] - 1
             centroids.append(small_centroids)
@@ -155,6 +154,7 @@ def split_clusters(
         for i in range(get_global_size()):
             Path(save_path, f"split_checkpoint_{i}.npy").unlink(missing_ok=True)
     logger.info("Finished split_clusters!")
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()

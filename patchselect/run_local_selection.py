@@ -9,25 +9,49 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from patchselect.arrow_utils import discover_arrow_files, extract_custom_metadata, load_arrow_shard
+from patchselect.arrow_utils import (
+    discover_arrow_files,
+    extract_custom_metadata,
+    load_arrow_shard,
+)
 from patchselect.config import PatchSelectionConfig
 from patchselect.io_utils import write_json, write_rows_part
 from patchselect.local_worker import config_to_payload, process_image_task
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run local stain-aware patch selection on Arrow shards.")
-    parser.add_argument("--data_dir", default="Data", help="Directory containing .arrow shards")
-    parser.add_argument("--output_dir", default="patchselect/out/local_selection", help="Output directory")
+    parser = argparse.ArgumentParser(
+        description="Run local stain-aware patch selection on Arrow shards."
+    )
+    parser.add_argument(
+        "--data_dir", default="Data", help="Directory containing .arrow shards"
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="patchselect/out/local_selection",
+        help="Output directory",
+    )
     parser.add_argument(
         "--split",
         default="train",
         choices=("all", "train", "valid", "test", "eval"),
         help="Which shard split to process",
     )
-    parser.add_argument("--limit_images", type=int, default=None, help="Optional maximum number of images to process")
-    parser.add_argument("--patch_size", type=int, default=256, help="Patch size before descriptor downsampling")
-    parser.add_argument("--patch_stride", type=int, default=256, help="Patch extraction stride")
+    parser.add_argument(
+        "--limit_images",
+        type=int,
+        default=None,
+        help="Optional maximum number of images to process",
+    )
+    parser.add_argument(
+        "--patch_size",
+        type=int,
+        default=256,
+        help="Patch size before descriptor downsampling",
+    )
+    parser.add_argument(
+        "--patch_stride", type=int, default=256, help="Patch extraction stride"
+    )
     parser.add_argument(
         "--descriptor_backend",
         default="cpu",
@@ -79,9 +103,24 @@ def parse_args() -> argparse.Namespace:
         default=0.75,
         help="Minimum patch foreground overlap required when rle_mask is available",
     )
-    parser.add_argument("--local_keep_ratio", type=float, default=0.10, help="Fraction of valid patches to keep per image")
-    parser.add_argument("--local_keep_min", type=int, default=1, help="Minimum selected patches per image")
-    parser.add_argument("--local_keep_max", type=int, default=4, help="Maximum selected patches per image")
+    parser.add_argument(
+        "--local_keep_ratio",
+        type=float,
+        default=0.10,
+        help="Fraction of valid patches to keep per image",
+    )
+    parser.add_argument(
+        "--local_keep_min",
+        type=int,
+        default=1,
+        help="Minimum selected patches per image",
+    )
+    parser.add_argument(
+        "--local_keep_max",
+        type=int,
+        default=4,
+        help="Maximum selected patches per image",
+    )
     parser.add_argument(
         "--semantic_weight",
         type=float,
@@ -124,7 +163,9 @@ def parse_args() -> argparse.Namespace:
         default=0.20,
         help="Coverage bonus for selecting a locally unseen interface bin",
     )
-    parser.add_argument("--flush_rows", type=int, default=5000, help="Rows per parquet flush")
+    parser.add_argument(
+        "--flush_rows", type=int, default=5000, help="Rows per parquet flush"
+    )
     parser.add_argument(
         "--save_selected_patches",
         action="store_true",
@@ -135,8 +176,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for selected patch crops; defaults to <output_dir>/selected_patches",
     )
-    parser.add_argument("--image_format", default="jpg", choices=("jpg", "jpeg", "png"), help="Saved patch image format")
-    parser.add_argument("--jpeg_quality", type=int, default=95, help="JPEG quality for saved patches")
+    parser.add_argument(
+        "--image_format",
+        default="jpg",
+        choices=("jpg", "jpeg", "png"),
+        help="Saved patch image format",
+    )
+    parser.add_argument(
+        "--jpeg_quality", type=int, default=95, help="JPEG quality for saved patches"
+    )
     return parser.parse_args()
 
 
@@ -180,7 +228,9 @@ def run_tasks_once(tasks: list[dict], worker_count: int) -> dict:
 
     results = []
     try:
-        with ProcessPoolExecutor(max_workers=worker_count, mp_context=mp.get_context("spawn")) as executor:
+        with ProcessPoolExecutor(
+            max_workers=worker_count, mp_context=mp.get_context("spawn")
+        ) as executor:
             futures = [executor.submit(process_image_task, task) for task in tasks]
             for future in as_completed(futures):
                 result = future.result()
@@ -218,10 +268,14 @@ def process_chunk_with_retries(
         )
 
 
-def flush_rows_if_needed(rows: list[dict], output_dir: Path, row_part_index: int, flush_rows: int) -> int:
+def flush_rows_if_needed(
+    rows: list[dict], output_dir: Path, row_part_index: int, flush_rows: int
+) -> int:
     if len(rows) < flush_rows:
         return row_part_index
-    row_part_index = write_rows_part(rows, output_dir / "candidates", "local_candidates", row_part_index)
+    row_part_index = write_rows_part(
+        rows, output_dir / "candidates", "local_candidates", row_part_index
+    )
     rows.clear()
     return row_part_index
 
@@ -230,7 +284,11 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    patch_dir = Path(args.selected_patch_dir) if args.selected_patch_dir else output_dir / "selected_patches"
+    patch_dir = (
+        Path(args.selected_patch_dir)
+        if args.selected_patch_dir
+        else output_dir / "selected_patches"
+    )
     gpu_ids = parse_gpu_ids(args.gpu_ids) if args.descriptor_backend == "cucim" else []
 
     cfg = PatchSelectionConfig(
@@ -306,7 +364,8 @@ def main() -> None:
             results, current_worker_count, reductions = process_chunk_with_retries(
                 chunk_tasks,
                 worker_count=current_worker_count,
-                allow_gpu_reduction=args.auto_reduce_gpu_workers and cfg.descriptor_backend == "cucim",
+                allow_gpu_reduction=args.auto_reduce_gpu_workers
+                and cfg.descriptor_backend == "cucim",
             )
             worker_reductions += reductions
             for result in results:
@@ -324,14 +383,19 @@ def main() -> None:
                     "workers": current_worker_count,
                 }
             )
-            row_part_index = flush_rows_if_needed(rows, output_dir, row_part_index, args.flush_rows)
+            row_part_index = flush_rows_if_needed(
+                rows, output_dir, row_part_index, args.flush_rows
+            )
             chunk_tasks.clear()
 
-        if chunk_tasks and (args.limit_images is None or processed_images < args.limit_images):
+        if chunk_tasks and (
+            args.limit_images is None or processed_images < args.limit_images
+        ):
             results, current_worker_count, reductions = process_chunk_with_retries(
                 chunk_tasks,
                 worker_count=current_worker_count,
-                allow_gpu_reduction=args.auto_reduce_gpu_workers and cfg.descriptor_backend == "cucim",
+                allow_gpu_reduction=args.auto_reduce_gpu_workers
+                and cfg.descriptor_backend == "cucim",
             )
             worker_reductions += reductions
             for result in results:
@@ -349,14 +413,18 @@ def main() -> None:
                     "workers": current_worker_count,
                 }
             )
-            row_part_index = flush_rows_if_needed(rows, output_dir, row_part_index, args.flush_rows)
+            row_part_index = flush_rows_if_needed(
+                rows, output_dir, row_part_index, args.flush_rows
+            )
 
         progress.close()
         if args.limit_images is not None and processed_images >= args.limit_images:
             break
 
     if rows:
-        row_part_index = write_rows_part(rows, output_dir / "candidates", "local_candidates", row_part_index)
+        row_part_index = write_rows_part(
+            rows, output_dir / "candidates", "local_candidates", row_part_index
+        )
 
     summary = {
         "processed_images": processed_images,

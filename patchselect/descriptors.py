@@ -133,9 +133,9 @@ def build_tissue_mask(
     cfg: PatchSelectionConfig,
     foreground_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    mask = ((od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)) | (
-        sat > cfg.sat_tissue_threshold
-    )
+    mask = (
+        (od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)
+    ) | (sat > cfg.sat_tissue_threshold)
     mask = remove_small_components(mask, cfg.min_component_size)
     mask = ndimage.binary_closing(mask, structure=disk(1))
     mask = ndimage.binary_fill_holes(mask)
@@ -156,7 +156,11 @@ def compute_slide_stats(
 ) -> SlideStats:
     if cfg.slide_stats_size is not None:
         slide_rgb = resize_rgb(rgb, cfg.slide_stats_size)
-        slide_foreground = resize_mask(foreground_mask, cfg.slide_stats_size) if foreground_mask is not None else None
+        slide_foreground = (
+            resize_mask(foreground_mask, cfg.slide_stats_size)
+            if foreground_mask is not None
+            else None
+        )
     else:
         slide_rgb = rgb
         slide_foreground = foreground_mask
@@ -165,8 +169,12 @@ def compute_slide_stats(
     d = np.clip(hed[..., 2], 0.0, None)
     e = np.abs(hed[..., 1])
     sat, value = rgb_to_hsv(slide_rgb)
-    od_sum = (-np.log(np.clip(slide_rgb.astype(np.float32) / 255.0, 1.0 / 255.0, 1.0))).sum(axis=-1)
-    tissue = build_tissue_mask(od_sum, sat, value, cfg, foreground_mask=slide_foreground)
+    od_sum = (
+        -np.log(np.clip(slide_rgb.astype(np.float32) / 255.0, 1.0 / 255.0, 1.0))
+    ).sum(axis=-1)
+    tissue = build_tissue_mask(
+        od_sum, sat, value, cfg, foreground_mask=slide_foreground
+    )
     if tissue.any():
         tissue_mask = tissue
     elif slide_foreground is not None and slide_foreground.any():
@@ -225,7 +233,11 @@ def compute_patch_descriptor(
         patch_rgb = resize_rgb(patch_rgb, cfg.downsample_size)
     patch_foreground = None
     if foreground_mask is not None:
-        patch_foreground = resize_mask(foreground_mask, cfg.downsample_size) if cfg.downsample_size is not None else foreground_mask
+        patch_foreground = (
+            resize_mask(foreground_mask, cfg.downsample_size)
+            if cfg.downsample_size is not None
+            else foreground_mask
+        )
     rgb = patch_rgb.astype(np.float32)
     hed = rgb_to_hed(rgb)
     h = np.clip(hed[..., 0], 0.0, None)
@@ -234,7 +246,9 @@ def compute_patch_descriptor(
     gray = rgb_to_gray(patch_rgb)
     sat, value = rgb_to_hsv(patch_rgb)
     od_sum = (-np.log(np.clip(rgb / 255.0, 1.0 / 255.0, 1.0))).sum(axis=-1)
-    tissue = build_tissue_mask(od_sum, sat, value, cfg, foreground_mask=patch_foreground)
+    tissue = build_tissue_mask(
+        od_sum, sat, value, cfg, foreground_mask=patch_foreground
+    )
     tissue_frac = float(tissue.mean())
     if tissue_frac < cfg.tissue_min_fraction:
         return None
@@ -289,7 +303,10 @@ def compute_patch_descriptor(
     features[30] = float((dab & ring).sum() / tissue_pixels)
     features[31] = float((dab & extra).sum() / tissue_pixels)
     features[32] = float(len(dab_areas) / tissue_pixels)
-    features[33] = float((ndimage.binary_dilation(dab, structure=disk(1)) ^ dab).sum() / max(dab.sum(), 1.0))
+    features[33] = float(
+        (ndimage.binary_dilation(dab, structure=disk(1)) ^ dab).sum()
+        / max(dab.sum(), 1.0)
+    )
     features[34] = float(np.log(np.var(lap) + 1e-6))
     features[35] = safe_mean(grad[tissue])
     features[36] = q(grad[tissue], 0.90)
@@ -312,7 +329,9 @@ def compute_patch_descriptors_cpu(
     if foreground_masks is None:
         foreground_masks = [None] * len(patches)
     return [
-        compute_patch_descriptor(patch, slide_stats, cfg, foreground_mask=foreground_mask)
+        compute_patch_descriptor(
+            patch, slide_stats, cfg, foreground_mask=foreground_mask
+        )
         for patch, foreground_mask in zip(patches, foreground_masks)
     ]
 

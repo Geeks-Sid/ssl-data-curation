@@ -32,7 +32,8 @@ def feature_idx(name: str) -> int:
 
 def positive_mass(base_descriptor: np.ndarray) -> float:
     return float(
-        base_descriptor[base_idx("d_hist_50_75")] + base_descriptor[base_idx("d_hist_75_100")]
+        base_descriptor[base_idx("d_hist_50_75")]
+        + base_descriptor[base_idx("d_hist_75_100")]
     )
 
 
@@ -96,8 +97,13 @@ def interface_bin_from_features(
 def add_neighborhood_features(records: list[dict]) -> None:
     if not records:
         return
-    base = np.stack([record["descriptor_base"] for record in records]).astype(np.float32)
-    grid_lookup = {(record["grid_row"], record["grid_col"]): idx for idx, record in enumerate(records)}
+    base = np.stack([record["descriptor_base"] for record in records]).astype(
+        np.float32
+    )
+    grid_lookup = {
+        (record["grid_row"], record["grid_col"]): idx
+        for idx, record in enumerate(records)
+    }
     semantic = base[:, SEMANTIC_FEATURE_INDICES]
 
     for idx, record in enumerate(records):
@@ -114,28 +120,43 @@ def add_neighborhood_features(records: list[dict]) -> None:
             neighbor_sem = semantic[neighbors]
             l1 = np.abs(neighbor_sem - semantic[idx]).sum(axis=1)
             center_pos = positive_mass(base[idx])
-            neighbor_pos = np.array([positive_mass(base[neighbor]) for neighbor in neighbors], dtype=np.float32)
+            neighbor_pos = np.array(
+                [positive_mass(base[neighbor]) for neighbor in neighbors],
+                dtype=np.float32,
+            )
             neighbor_features = np.array(
                 [
                     float(l1.mean()),
                     float(l1.max()),
-                    float(np.abs(base[idx, base_idx("d_mean")] - base[neighbors, base_idx("d_mean")]).mean()),
+                    float(
+                        np.abs(
+                            base[idx, base_idx("d_mean")]
+                            - base[neighbors, base_idx("d_mean")]
+                        ).mean()
+                    ),
                     float(np.abs(center_pos - neighbor_pos).mean()),
                     float(
                         np.abs(
-                            base[idx, base_idx("nuclei_frac")] - base[neighbors, base_idx("nuclei_frac")]
+                            base[idx, base_idx("nuclei_frac")]
+                            - base[neighbors, base_idx("nuclei_frac")]
                         ).mean()
                     ),
                     float(
                         np.mean(
-                            [stain_state_bin(base[idx]) != stain_state_bin(base[neighbor]) for neighbor in neighbors]
+                            [
+                                stain_state_bin(base[idx])
+                                != stain_state_bin(base[neighbor])
+                                for neighbor in neighbors
+                            ]
                         )
                     ),
                 ],
                 dtype=np.float32,
             )
 
-        record["descriptor"] = np.concatenate([base[idx], neighbor_features]).astype(np.float32)
+        record["descriptor"] = np.concatenate([base[idx], neighbor_features]).astype(
+            np.float32
+        )
         record["state_bin"] = stain_state_bin(base[idx])
         record["interface_bin"] = interface_bin_from_features(
             neigh_posfrac_diff=float(neighbor_features[3]),
@@ -146,7 +167,9 @@ def add_neighborhood_features(records: list[dict]) -> None:
 def compute_local_scores(records: list[dict], cfg: PatchSelectionConfig) -> None:
     if not records:
         return
-    final_matrix = np.stack([record["descriptor"] for record in records]).astype(np.float32)
+    final_matrix = np.stack([record["descriptor"] for record in records]).astype(
+        np.float32
+    )
     semantic = robust_scale(final_matrix[:, SEMANTIC_FEATURE_INDICES])
     semantic_center = semantic.mean(axis=0)
     centrality_raw = -np.abs(semantic - semantic_center).sum(axis=1)
@@ -156,7 +179,9 @@ def compute_local_scores(records: list[dict], cfg: PatchSelectionConfig) -> None
         distances = np.abs(semantic[:, None, :] - semantic[None, :, :]).sum(axis=2)
         np.fill_diagonal(distances, np.inf)
         neighbor_count = min(3, len(records) - 1)
-        nearest = np.partition(distances, neighbor_count - 1, axis=1)[:, :neighbor_count]
+        nearest = np.partition(distances, neighbor_count - 1, axis=1)[
+            :, :neighbor_count
+        ]
         rarity_raw = nearest.mean(axis=1)
 
     positive_tail_raw = (
@@ -164,7 +189,10 @@ def compute_local_scores(records: list[dict], cfg: PatchSelectionConfig) -> None
         + 2.0 * final_matrix[:, feature_idx("d_hist_75_100")]
         + 0.5 * final_matrix[:, feature_idx("d_pos_mean")]
     )
-    quality_raw = final_matrix[:, feature_idx("log_lap_var")] + 0.5 * final_matrix[:, feature_idx("grad_p90")]
+    quality_raw = (
+        final_matrix[:, feature_idx("log_lap_var")]
+        + 0.5 * final_matrix[:, feature_idx("grad_p90")]
+    )
     interface_raw = (
         final_matrix[:, feature_idx("neigh_sem_l1_mean")]
         + 0.5 * final_matrix[:, feature_idx("neigh_posfrac_diff")]
@@ -176,7 +204,11 @@ def compute_local_scores(records: list[dict], cfg: PatchSelectionConfig) -> None
         + 0.5 * final_matrix[:, feature_idx("hole_frac")]
         + 0.25 * final_matrix[:, feature_idx("border_tissue_frac")]
     )
-    semantic_coverage_raw = rarity_raw + 0.5 * positive_tail_raw + 0.25 * final_matrix[:, feature_idx("compartment_margin")]
+    semantic_coverage_raw = (
+        rarity_raw
+        + 0.5 * positive_tail_raw
+        + 0.25 * final_matrix[:, feature_idx("compartment_margin")]
+    )
     redundancy_raw = -rarity_raw
 
     rarity = zscore(rarity_raw)
@@ -218,12 +250,17 @@ def target_local_keep(count: int, cfg: PatchSelectionConfig) -> int:
     return min(cfg.local_keep_max, max(cfg.local_keep_min, scaled))
 
 
-def role_based_local_selection(records: list[dict], cfg: PatchSelectionConfig) -> list[dict]:
+def role_based_local_selection(
+    records: list[dict], cfg: PatchSelectionConfig
+) -> list[dict]:
     if not records:
         return []
     keep = min(len(records), target_local_keep(len(records), cfg))
     if keep >= len(records):
-        for rank, record in enumerate(sorted(records, key=lambda item: item["objective_score"], reverse=True), start=1):
+        for rank, record in enumerate(
+            sorted(records, key=lambda item: item["objective_score"], reverse=True),
+            start=1,
+        ):
             record["selection_rank"] = rank
             record["selection_role"] = "all_retained"
         return records
@@ -243,7 +280,10 @@ def role_based_local_selection(records: list[dict], cfg: PatchSelectionConfig) -
             break
         ordered = sorted(
             range(len(records)),
-            key=lambda idx: (records[idx][role_to_score_key[role]], records[idx]["objective_score"]),
+            key=lambda idx: (
+                records[idx][role_to_score_key[role]],
+                records[idx]["objective_score"],
+            ),
             reverse=True,
         )
         for idx in ordered:
@@ -284,7 +324,9 @@ def role_based_local_selection(records: list[dict], cfg: PatchSelectionConfig) -
 
 
 def bin_key_from_row(row: pd.Series, bin_columns: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple("" if pd.isna(row[column]) else str(row[column]) for column in bin_columns)
+    return tuple(
+        "" if pd.isna(row[column]) else str(row[column]) for column in bin_columns
+    )
 
 
 def serialize_bin_key(bin_key: tuple[str, ...]) -> str:
@@ -293,7 +335,9 @@ def serialize_bin_key(bin_key: tuple[str, ...]) -> str:
     return digest
 
 
-def count_bin_frequencies(candidate_files: list[Path], bin_columns: tuple[str, ...]) -> Counter[tuple[str, ...]]:
+def count_bin_frequencies(
+    candidate_files: list[Path], bin_columns: tuple[str, ...]
+) -> Counter[tuple[str, ...]]:
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
     counts: Counter[tuple[str, ...]] = Counter()
     for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
@@ -323,11 +367,15 @@ def allocate_bin_quotas(
 
     raw = target_size * weights / weight_sum
     quotas = np.floor(raw).astype(int)
-    quotas = np.minimum(quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int))
+    quotas = np.minimum(
+        quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int)
+    )
 
     if min_quota > 0 and target_size >= len(bins) * min_quota:
         quotas = np.maximum(quotas, min_quota)
-        quotas = np.minimum(quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int))
+        quotas = np.minimum(
+            quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int)
+        )
 
     remainder = target_size - int(quotas.sum())
     if remainder > 0:
@@ -366,7 +414,9 @@ def partition_candidates(
         frame = batch.to_pandas()
         if frame.empty:
             continue
-        frame["_bin_key"] = frame.apply(lambda row: bin_key_from_row(row, bin_columns), axis=1)
+        frame["_bin_key"] = frame.apply(
+            lambda row: bin_key_from_row(row, bin_columns), axis=1
+        )
         for bin_key, group in frame.groupby("_bin_key", sort=False):
             token = serialize_bin_key(bin_key)
             key_lookup[token] = bin_key
@@ -376,9 +426,14 @@ def partition_candidates(
             write_dataframe_part(group.drop(columns="_bin_key"), part_path)
             part_index += 1
 
-    mapping_rows = [{"partition": token, "bin_key": json.dumps(list(bin_key))} for token, bin_key in key_lookup.items()]
+    mapping_rows = [
+        {"partition": token, "bin_key": json.dumps(list(bin_key))}
+        for token, bin_key in key_lookup.items()
+    ]
     if mapping_rows:
-        pd.DataFrame(mapping_rows).to_parquet(partition_root / "partition_map.parquet", index=False)
+        pd.DataFrame(mapping_rows).to_parquet(
+            partition_root / "partition_map.parquet", index=False
+        )
     return key_lookup
 
 
@@ -400,7 +455,11 @@ def select_top_by_bin(
         files = sorted(partition_dir.glob("*.parquet"))
         if not files:
             continue
-        frame = ds.dataset([str(path) for path in files], format="parquet").to_table().to_pandas()
+        frame = (
+            ds.dataset([str(path) for path in files], format="parquet")
+            .to_table()
+            .to_pandas()
+        )
         if frame.empty:
             continue
         frame = frame.nlargest(quota, utility_column)
@@ -424,7 +483,9 @@ def run_global_selection(
         min_quota=config.per_bin_min_quota,
     )
     partition_root = output_dir / config.partition_dir_name
-    key_lookup = partition_candidates(candidate_files, partition_root, config.bin_columns)
+    key_lookup = partition_candidates(
+        candidate_files, partition_root, config.bin_columns
+    )
     selected_rows = select_top_by_bin(
         partition_root=partition_root,
         quotas=quotas,

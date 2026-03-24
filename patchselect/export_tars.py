@@ -12,7 +12,12 @@ import pandas as pd
 import pyarrow.dataset as ds
 from PIL import Image
 
-from patchselect.arrow_utils import discover_arrow_files, load_arrow_shard, open_rgb_image, slugify
+from patchselect.arrow_utils import (
+    discover_arrow_files,
+    load_arrow_shard,
+    open_rgb_image,
+    slugify,
+)
 from patchselect.io_utils import write_dataframe_part, write_json
 
 
@@ -40,7 +45,9 @@ def build_patch_member_name(row: dict, image_format: str) -> str:
     )
 
 
-def resolve_shard_path(source_shard: str, data_dir: Path | None, lookup: dict[str, Path]) -> Path:
+def resolve_shard_path(
+    source_shard: str, data_dir: Path | None, lookup: dict[str, Path]
+) -> Path:
     shard_path = Path(source_shard)
     if shard_path.exists():
         return shard_path
@@ -54,10 +61,14 @@ def resolve_shard_path(source_shard: str, data_dir: Path | None, lookup: dict[st
 def build_data_dir_lookup(data_dir: Path | None) -> dict[str, Path]:
     if data_dir is None:
         return {}
-    return {path.name.lower(): path for path in discover_arrow_files(data_dir, split="all")}
+    return {
+        path.name.lower(): path for path in discover_arrow_files(data_dir, split="all")
+    }
 
 
-def encode_patch_image(patch: Image.Image, image_format: str, jpeg_quality: int) -> bytes:
+def encode_patch_image(
+    patch: Image.Image, image_format: str, jpeg_quality: int
+) -> bytes:
     buffer = io.BytesIO()
     if image_format.lower() in {"jpg", "jpeg"}:
         patch.save(buffer, format="JPEG", quality=jpeg_quality)
@@ -77,7 +88,9 @@ def partition_final_selection_by_shard(
     partition_root: Path,
 ) -> dict[str, str]:
     partition_root.mkdir(parents=True, exist_ok=True)
-    dataset = ds.dataset([str(path) for path in final_selection_files], format="parquet")
+    dataset = ds.dataset(
+        [str(path) for path in final_selection_files], format="parquet"
+    )
     part_index = 0
     token_to_shard: dict[str, str] = {}
 
@@ -103,7 +116,9 @@ def partition_final_selection_by_shard(
         for token, source_shard in token_to_shard.items()
     ]
     if mapping_rows:
-        pd.DataFrame(mapping_rows).to_parquet(partition_root / "shard_partition_map.parquet", index=False)
+        pd.DataFrame(mapping_rows).to_parquet(
+            partition_root / "shard_partition_map.parquet", index=False
+        )
     return token_to_shard
 
 
@@ -116,11 +131,17 @@ def export_partition_to_tar(
     default_patch_size: int,
     compression: str,
 ) -> dict[str, int]:
-    frame = ds.dataset([str(path) for path in partition_files], format="parquet").to_table().to_pandas()
+    frame = (
+        ds.dataset([str(path) for path in partition_files], format="parquet")
+        .to_table()
+        .to_pandas()
+    )
     if frame.empty:
         return {"selected_rows": 0, "written_members": 0}
 
-    frame = frame.sort_values(["source_index", "patch_index", "patch_y", "patch_x"]).reset_index(drop=True)
+    frame = frame.sort_values(
+        ["source_index", "patch_index", "patch_y", "patch_x"]
+    ).reset_index(drop=True)
     dataset = load_arrow_shard(resolved_shard_path)
     tar_path.parent.mkdir(parents=True, exist_ok=True)
     tar_mode = "w:gz" if compression == "gz" else "w"
@@ -142,7 +163,9 @@ def export_partition_to_tar(
             if current_image is None:
                 continue
 
-            patch_size = resolve_patch_size(getattr(row, "patch_size", None), default_patch_size)
+            patch_size = resolve_patch_size(
+                getattr(row, "patch_size", None), default_patch_size
+            )
             left = int(row.patch_x)
             top = int(row.patch_y)
             right = min(left + patch_size, current_image.width)
@@ -151,8 +174,12 @@ def export_partition_to_tar(
                 continue
 
             patch = current_image.crop((left, top, right, bottom))
-            encoded = encode_patch_image(patch, image_format=image_format, jpeg_quality=jpeg_quality)
-            member_name = build_patch_member_name(row._asdict(), image_format=image_format)
+            encoded = encode_patch_image(
+                patch, image_format=image_format, jpeg_quality=jpeg_quality
+            )
+            member_name = build_patch_member_name(
+                row._asdict(), image_format=image_format
+            )
             info = tarfile.TarInfo(name=member_name)
             info.size = len(encoded)
             info.mtime = 0
@@ -173,10 +200,14 @@ def export_selected_patches_to_tars(
     compression: str = "none",
 ) -> dict[str, int]:
     if not final_selection_files:
-        raise FileNotFoundError("No final selection parquet files provided for tar export")
+        raise FileNotFoundError(
+            "No final selection parquet files provided for tar export"
+        )
 
     partition_root = output_dir / "shard_partitions"
-    token_to_shard = partition_final_selection_by_shard(final_selection_files, partition_root)
+    token_to_shard = partition_final_selection_by_shard(
+        final_selection_files, partition_root
+    )
     data_dir_lookup = build_data_dir_lookup(data_dir)
 
     tar_count = 0
@@ -189,7 +220,9 @@ def export_selected_patches_to_tars(
         partition_files = sorted(partition_dir.glob("*.parquet"))
         if not partition_files:
             continue
-        resolved_shard_path = resolve_shard_path(source_shard, data_dir=data_dir, lookup=data_dir_lookup)
+        resolved_shard_path = resolve_shard_path(
+            source_shard, data_dir=data_dir, lookup=data_dir_lookup
+        )
         tar_path = output_dir / build_tar_name(source_shard, compression=compression)
         shard_result = export_partition_to_tar(
             partition_files=partition_files,
@@ -225,7 +258,9 @@ def export_selected_patches_to_tars(
         "jpeg_quality": jpeg_quality,
         "default_patch_size": default_patch_size,
     }
-    write_json(output_dir / "tar_export_summary.json", {**summary, "shards": shard_summaries})
+    write_json(
+        output_dir / "tar_export_summary.json", {**summary, "shards": shard_summaries}
+    )
     return summary
 
 
@@ -280,7 +315,9 @@ def main() -> None:
     final_selection_dir = Path(args.final_selection_dir)
     final_selection_files = sorted(final_selection_dir.glob("*.parquet"))
     if not final_selection_files:
-        raise FileNotFoundError(f"No final selection parquet files found in {final_selection_dir}")
+        raise FileNotFoundError(
+            f"No final selection parquet files found in {final_selection_dir}"
+        )
     output_dir = Path(args.output_dir)
     result = export_selected_patches_to_tars(
         final_selection_files=final_selection_files,

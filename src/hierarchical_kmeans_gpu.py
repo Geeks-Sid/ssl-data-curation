@@ -19,12 +19,7 @@ MEMORY_LIMIT = 1e8
 
 
 def hierarchical_kmeans(
-    data,
-    n_clusters,
-    n_levels,
-    init_method="kmeans++",
-    num_init=1,
-    verbose=True
+    data, n_clusters, n_levels, init_method="kmeans++", num_init=1, verbose=True
 ):
     """
     Run hierarchical k-means on data without resampling steps.
@@ -73,7 +68,7 @@ def hierarchical_kmeans(
             dist="l2",
             high_precision=torch.float64,
             random_state=None,
-            verbose=verbose
+            verbose=verbose,
         )
         res.append(
             {
@@ -169,8 +164,7 @@ def hierarchical_kmeans_with_resampling(
                     sorted_clusters = [
                         _cluster[
                             torch.argsort(
-                                torch.cdist(X[_cluster], centroids[i, None])
-                                .flatten()
+                                torch.cdist(X[_cluster], centroids[i, None]).flatten()
                             )
                             .cpu()
                             .numpy()
@@ -178,10 +172,7 @@ def hierarchical_kmeans_with_resampling(
                         for i, _cluster in enumerate(clusters)
                     ]
                     sampled_points = torch.concat(
-                        [
-                            X[_cluster[: _sample_size]]
-                            for _cluster in sorted_clusters
-                        ]
+                        [X[_cluster[:_sample_size]] for _cluster in sorted_clusters]
                     )
                 elif sample_strategy == "random":
                     sampled_points = torch.concat(
@@ -190,7 +181,7 @@ def hierarchical_kmeans_with_resampling(
                                 np.random.choice(
                                     _cluster,
                                     min(len(_cluster), _sample_size),
-                                    replace=False
+                                    replace=False,
                                 )
                             ]
                             for _cluster in clusters
@@ -201,8 +192,7 @@ def hierarchical_kmeans_with_resampling(
                         f"sample_strategy={sample_strategy} not supported!"
                     )
                 chunk_size = min(
-                    sampled_points.shape[0],
-                    int(MEMORY_LIMIT / n_clusters[kmid])
+                    sampled_points.shape[0], int(MEMORY_LIMIT / n_clusters[kmid])
                 )
                 centroids, _, _, _ = kmg.kmeans(
                     sampled_points,
@@ -214,18 +204,17 @@ def hierarchical_kmeans_with_resampling(
                     dist="l2",
                     high_precision=torch.float64,
                     random_state=None,
-                    verbose=False
+                    verbose=False,
                 )
-                cluster_assignment = kmg.assign_clusters(
-                    centroids,
-                    X,
-                    "l2",
-                    chunk_size=chunk_size,
-                    verbose=False
-                ).cpu().numpy()
+                cluster_assignment = (
+                    kmg.assign_clusters(
+                        centroids, X, "l2", chunk_size=chunk_size, verbose=False
+                    )
+                    .cpu()
+                    .numpy()
+                )
                 clusters = kmg.create_clusters_from_cluster_assignment(
-                    cluster_assignment,
-                    n_clusters[kmid]
+                    cluster_assignment, n_clusters[kmid]
                 )
         res.append(
             {

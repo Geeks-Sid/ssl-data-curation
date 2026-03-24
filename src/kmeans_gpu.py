@@ -404,7 +404,12 @@ def kmeans(
 
 
 def sort_cluster_by_distance(
-    X, centroids, clusters, device="cuda", dtype=torch.float32, verbose=False,
+    X,
+    centroids,
+    clusters,
+    device="cuda",
+    dtype=torch.float32,
+    verbose=False,
 ):
     """
     Sort data points in each cluster in increasing order of distance to the centroid.

@@ -25,10 +25,12 @@ def load_clusters_from_file(fpath):
     else:
         return np.load(Path(fpath), allow_pickle=True)
 
+
 class HierarchicalCluster:
     """
     Class representing a hierarchy of clusters returned by hierarchical k-means.
     """
+
     def __init__(self):
         self.cluster_path = None
         self.n_levels = None
@@ -46,11 +48,7 @@ class HierarchicalCluster:
     def load_clusters_from_file(self):
         for level in range(1, 1 + self.n_levels):
             self.clusters[level] = load_clusters_from_file(
-                Path(
-                    self.cluster_path,
-                    f"level{level}",
-                    self.cluster_fname
-                )
+                Path(self.cluster_path, f"level{level}", self.cluster_fname)
             )
             self.n_clusters[level] = len(self.clusters[level])
         self.is_loaded = True
@@ -65,8 +63,11 @@ class HierarchicalCluster:
             prev_flat = self.flat_clusters[level - 1]
             self.flat_clusters[level] = np.array(
                 [
-                    np.concatenate([prev_flat[el] for el in clus])
-                    if len(clus) > 0 else np.array([])
+                    (
+                        np.concatenate([prev_flat[el] for el in clus])
+                        if len(clus) > 0
+                        else np.array([])
+                    )
                     for clus in current_non_flat
                 ],
                 dtype=object,

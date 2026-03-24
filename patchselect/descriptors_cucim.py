@@ -6,7 +6,13 @@ import numpy as np
 
 from patchselect.config import PatchSelectionConfig
 from patchselect.constants import BASE_FEATURE_NAMES
-from patchselect.descriptors import HED_FROM_RGB, SlideStats, disk, resize_mask, resize_rgb
+from patchselect.descriptors import (
+    HED_FROM_RGB,
+    SlideStats,
+    disk,
+    resize_mask,
+    resize_rgb,
+)
 
 
 def _load_gpu_modules():
@@ -43,7 +49,9 @@ def _safe_std(values, cp) -> float:
     return _scalar(values.std())
 
 
-def _normalized_histogram(values, cp, bins: int = 4, value_range: tuple[float, float] = (0.0, 1.0)):
+def _normalized_histogram(
+    values, cp, bins: int = 4, value_range: tuple[float, float] = (0.0, 1.0)
+):
     if int(values.size) == 0:
         return cp.zeros(bins, dtype=cp.float32)
     hist, _ = cp.histogram(values, bins=bins, range=value_range)
@@ -105,10 +113,12 @@ def _sobel_mag(gray, cnd, cp):
     return cp.hypot(gx, gy)
 
 
-def _build_tissue_mask(od_sum, sat, value, cfg: PatchSelectionConfig, cp, cnd, foreground_mask=None):
-    mask = ((od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)) | (
-        sat > cfg.sat_tissue_threshold
-    )
+def _build_tissue_mask(
+    od_sum, sat, value, cfg: PatchSelectionConfig, cp, cnd, foreground_mask=None
+):
+    mask = (
+        (od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)
+    ) | (sat > cfg.sat_tissue_threshold)
     mask = _remove_small_components(mask, cfg.min_component_size, cp, cnd)
     mask = cnd.binary_closing(mask, structure=cp.asarray(disk(1)))
     mask = cnd.binary_fill_holes(mask)
@@ -125,7 +135,11 @@ def _prepare_slide_inputs(
     if cfg.slide_stats_size is None:
         return rgb, foreground_mask
     resized_rgb = resize_rgb(rgb, cfg.slide_stats_size)
-    resized_mask = resize_mask(foreground_mask, cfg.slide_stats_size) if foreground_mask is not None else None
+    resized_mask = (
+        resize_mask(foreground_mask, cfg.slide_stats_size)
+        if foreground_mask is not None
+        else None
+    )
     return resized_rgb, resized_mask
 
 
@@ -153,15 +167,23 @@ def compute_slide_stats_cucim(
 ) -> SlideStats:
     cp, cnd = _load_gpu_modules()
     slide_rgb, slide_foreground = _prepare_slide_inputs(rgb, foreground_mask, cfg)
-    rgb_norm = cp.clip(cp.asarray(slide_rgb, dtype=cp.float32) / 255.0, 1.0 / 255.0, 1.0)
+    rgb_norm = cp.clip(
+        cp.asarray(slide_rgb, dtype=cp.float32) / 255.0, 1.0 / 255.0, 1.0
+    )
     od, hed = _rgb_to_hed(rgb_norm, cp)
     h = cp.clip(hed[..., 0], 0.0, None)
     d = cp.clip(hed[..., 2], 0.0, None)
     e = cp.abs(hed[..., 1])
     sat, value = _rgb_to_hsv(rgb_norm, cp)
     od_sum = od.sum(axis=-1)
-    foreground_gpu = cp.asarray(slide_foreground.astype(bool)) if slide_foreground is not None else None
-    tissue = _build_tissue_mask(od_sum, sat, value, cfg, cp, cnd, foreground_mask=foreground_gpu)
+    foreground_gpu = (
+        cp.asarray(slide_foreground.astype(bool))
+        if slide_foreground is not None
+        else None
+    )
+    tissue = _build_tissue_mask(
+        od_sum, sat, value, cfg, cp, cnd, foreground_mask=foreground_gpu
+    )
     if int(tissue.sum()) > 0:
         tissue_mask = tissue
     elif foreground_gpu is not None and int(foreground_gpu.sum()) > 0:
@@ -187,7 +209,9 @@ def compute_patch_descriptors_cucim(
         return []
 
     cp, cnd = _load_gpu_modules()
-    prepared_patches, prepared_masks = _prepare_patch_inputs(patches, foreground_masks, cfg)
+    prepared_patches, prepared_masks = _prepare_patch_inputs(
+        patches, foreground_masks, cfg
+    )
     batch = cp.asarray(np.stack(prepared_patches, axis=0), dtype=cp.float32)
     rgb_norm = cp.clip(batch / 255.0, 1.0 / 255.0, 1.0)
     od, hed = _rgb_to_hed(rgb_norm, cp)
@@ -197,9 +221,9 @@ def compute_patch_descriptors_cucim(
     gray = _rgb_to_gray(batch, cp)
     sat, value = _rgb_to_hsv(rgb_norm, cp)
     od_sum = od.sum(axis=-1)
-    raw_tissue = ((od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)) | (
-        sat > cfg.sat_tissue_threshold
-    )
+    raw_tissue = (
+        (od_sum > cfg.od_tissue_threshold) & (value < cfg.value_tissue_threshold)
+    ) | (sat > cfg.sat_tissue_threshold)
     mask_batch = None
     if prepared_masks is not None and prepared_masks and prepared_masks[0] is not None:
         mask_batch = cp.asarray(np.stack(prepared_masks, axis=0).astype(np.bool_))
@@ -212,7 +236,9 @@ def compute_patch_descriptors_cucim(
 
     descriptors: list[np.ndarray | None] = []
     for index in range(len(prepared_patches)):
-        tissue = _remove_small_components(raw_tissue[index], cfg.min_component_size, cp, cnd)
+        tissue = _remove_small_components(
+            raw_tissue[index], cfg.min_component_size, cp, cnd
+        )
         tissue = cnd.binary_closing(tissue, structure=structure_1)
         tissue = cnd.binary_fill_holes(tissue)
         if mask_batch is not None:
@@ -269,18 +295,26 @@ def compute_patch_descriptors_cucim(
         features[13] = _q(dn[tissue], cp, 0.90)
         features[14] = _safe_mean(en[tissue], cp)
         features[15] = _q(en[tissue], cp, 0.90)
-        features[16:20] = _normalized_histogram(hn[tissue], cp, bins=4, value_range=(0.0, 1.0))
-        features[20:24] = _normalized_histogram(dn[tissue], cp, bins=4, value_range=(0.0, 1.0))
+        features[16:20] = _normalized_histogram(
+            hn[tissue], cp, bins=4, value_range=(0.0, 1.0)
+        )
+        features[20:24] = _normalized_histogram(
+            dn[tissue], cp, bins=4, value_range=(0.0, 1.0)
+        )
         features[24] = _safe_mean(dn[dab], cp)
         features[25] = _scalar(nuclei.sum()) / tissue_pixels
         features[26] = len(nuclei_areas) / tissue_pixels
         features[27] = _safe_mean(nuclei_areas, cp) / tissue_pixels
-        features[28] = _safe_std(nuclei_areas, cp) / max(_safe_mean(nuclei_areas, cp), 1e-6)
+        features[28] = _safe_std(nuclei_areas, cp) / max(
+            _safe_mean(nuclei_areas, cp), 1e-6
+        )
         features[29] = _scalar((dab & nuclei).sum()) / tissue_pixels
         features[30] = _scalar((dab & ring).sum()) / tissue_pixels
         features[31] = _scalar((dab & extra).sum()) / tissue_pixels
         features[32] = len(dab_areas) / tissue_pixels
-        features[33] = _scalar((cnd.binary_dilation(dab, structure=structure_1) ^ dab).sum()) / max(
+        features[33] = _scalar(
+            (cnd.binary_dilation(dab, structure=structure_1) ^ dab).sum()
+        ) / max(
             _scalar(dab.sum()),
             1.0,
         )
@@ -297,9 +331,13 @@ def compute_patch_descriptors_cucim(
         border[:, : cfg.border_width] = True
         border[:, -cfg.border_width :] = True
         features[40] = _scalar((tissue & border).sum()) / tissue_pixels
-        loc_fracs = cp.asarray([features[29], features[30], features[31]], dtype=cp.float32)
+        loc_fracs = cp.asarray(
+            [features[29], features[30], features[31]], dtype=cp.float32
+        )
         sorted_loc = cp.sort(loc_fracs)[::-1]
-        features[41] = _scalar(sorted_loc[0] - sorted_loc[1]) if int(sorted_loc.size) >= 2 else 0.0
+        features[41] = (
+            _scalar(sorted_loc[0] - sorted_loc[1]) if int(sorted_loc.size) >= 2 else 0.0
+        )
         descriptors.append(cp.asnumpy(features).astype(np.float32))
 
     return descriptors

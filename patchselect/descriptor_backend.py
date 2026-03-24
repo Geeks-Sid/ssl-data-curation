@@ -5,7 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 from patchselect.config import PatchSelectionConfig
-from patchselect.descriptors import SlideStats, compute_patch_descriptors_cpu, compute_slide_stats
+from patchselect.descriptors import (
+    SlideStats,
+    compute_patch_descriptors_cpu,
+    compute_slide_stats,
+)
 
 
 def backend_is_available(name: str) -> bool:
