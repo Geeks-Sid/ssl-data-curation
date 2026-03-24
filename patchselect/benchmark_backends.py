@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import time
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from patchselect.config import PatchSelectionConfig
 from patchselect.descriptor_backend import available_descriptor_backends, backend_is_available
 from patchselect.io_utils import write_json
 from patchselect.pipeline import select_patches_from_image
+from patchselect.run_local_selection import build_task, parse_gpu_ids, process_chunk_with_retries
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--synthetic_size", type=int, default=3000, help="Side length for synthetic images")
     parser.add_argument("--patch_size", type=int, default=256, help="Patch size")
     parser.add_argument("--patch_stride", type=int, default=256, help="Patch stride")
+    parser.add_argument("--num_workers", type=int, default=1, help="Worker processes for benchmark execution")
+    parser.add_argument(
+        "--auto_reduce_gpu_workers",
+        action="store_true",
+        help="Retry cucim benchmark chunks with fewer workers after GPU OOM",
+    )
+    parser.add_argument("--gpu_ids", default=None, help="Comma-separated GPU ids for cucim worker tasks")
     parser.add_argument("--downsample_size", type=int, default=None, help="Optional patch descriptor downsample size")
     parser.add_argument(
         "--slide_stats_size",
@@ -65,9 +74,15 @@ def maybe_sync_gpu(backend: str) -> None:
         return
 
 
-def build_synthetic_samples(count: int, size: int) -> list[tuple[Image.Image, str, dict, str, int]]:
+def image_to_jpeg_bytes(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def build_synthetic_samples(count: int, size: int) -> list[tuple[bytes, str, dict, str, int]]:
     rng = np.random.default_rng(7)
-    samples: list[tuple[Image.Image, str, dict, str, int]] = []
+    samples: list[tuple[bytes, str, dict, str, int]] = []
     for index in range(count):
         canvas = np.full((size, size, 3), 245, dtype=np.uint8)
         image = Image.fromarray(canvas)
@@ -88,13 +103,13 @@ def build_synthetic_samples(count: int, size: int) -> list[tuple[Image.Image, st
             "cell_type": "synthetic",
             "diagnosis": "synthetic benchmark image",
         }
-        samples.append((image, f"synthetic-{index}", metadata, "synthetic", index))
+        samples.append((image_to_jpeg_bytes(image), f"synthetic-{index}", metadata, "synthetic", index))
     return samples
 
 
-def load_arrow_samples(data_dir: Path, split: str, limit_images: int) -> list[tuple[Image.Image, str, dict, str, int]]:
+def load_arrow_samples(data_dir: Path, split: str, limit_images: int) -> list[tuple[bytes, str, dict, str, int]]:
     files = discover_arrow_files(data_dir, split=split)
-    samples: list[tuple[Image.Image, str, dict, str, int]] = []
+    samples: list[tuple[bytes, str, dict, str, int]] = []
     for shard_path in files:
         dataset = load_arrow_shard(shard_path)
         for source_index, item in enumerate(dataset):
@@ -102,15 +117,14 @@ def load_arrow_samples(data_dir: Path, split: str, limit_images: int) -> list[tu
             if not bytes_data:
                 continue
             metadata = extract_custom_metadata(item)
-            image = open_rgb_image(bytes_data)
             sample_id = str(metadata.get("md5") or f"{shard_path.stem}:{source_index}")
-            samples.append((image, sample_id, metadata, str(shard_path), source_index))
+            samples.append((bytes_data, sample_id, metadata, str(shard_path), source_index))
             if len(samples) >= limit_images:
                 return samples
     return samples
 
 
-def load_samples(args: argparse.Namespace) -> tuple[list[tuple[Image.Image, str, dict, str, int]], str]:
+def load_samples(args: argparse.Namespace) -> tuple[list[tuple[bytes, str, dict, str, int]], str]:
     if args.synthetic_images > 0:
         return build_synthetic_samples(args.synthetic_images, args.synthetic_size), "synthetic"
     try:
@@ -125,7 +139,7 @@ def load_samples(args: argparse.Namespace) -> tuple[list[tuple[Image.Image, str,
 
 def run_backend(
     backend: str,
-    samples: list[tuple[Image.Image, str, dict, str, int]],
+    samples: list[tuple[bytes, str, dict, str, int]],
     args: argparse.Namespace,
 ) -> dict[str, object]:
     result: dict[str, object] = {
@@ -147,7 +161,8 @@ def run_backend(
 
     warmup = min(args.warmup_images, len(samples))
     try:
-        for image, sample_id, metadata, source_shard, source_index in samples[:warmup]:
+        for bytes_data, sample_id, metadata, source_shard, source_index in samples[:warmup]:
+            image = open_rgb_image(bytes_data)
             select_patches_from_image(
                 image=image,
                 sample_id=sample_id,
@@ -170,18 +185,50 @@ def run_backend(
     total_valid_patches = 0
     start = time.perf_counter()
     try:
-        for image, sample_id, metadata, source_shard, source_index in measured:
-            rows, _ = select_patches_from_image(
-                image=image,
-                sample_id=sample_id,
-                metadata=metadata,
-                cfg=cfg,
-                source_shard=source_shard,
-                source_index=source_index,
+        if args.num_workers > 1:
+            gpu_ids = parse_gpu_ids(args.gpu_ids) if backend == "cucim" else []
+            tasks = []
+            for task_index, (bytes_data, sample_id, metadata, source_shard, source_index) in enumerate(measured):
+                gpu_id = gpu_ids[task_index % len(gpu_ids)] if gpu_ids else None
+                tasks.append(
+                    build_task(
+                        cfg=cfg,
+                        bytes_data=bytes_data,
+                        metadata=metadata,
+                        sample_id=sample_id,
+                        source_shard=source_shard,
+                        source_index=source_index,
+                        save_selected_patches=False,
+                        selected_patch_dir=Path("patchselect/out/benchmark_selected"),
+                        gpu_id=gpu_id,
+                    )
+                )
+            worker_results, effective_workers, reductions = process_chunk_with_retries(
+                tasks,
+                worker_count=args.num_workers,
+                allow_gpu_reduction=args.auto_reduce_gpu_workers and backend == "cucim",
             )
-            total_selected_patches += len(rows)
-            if rows:
-                total_valid_patches += int(rows[0]["local_valid_patch_count"])
+            result["effective_workers"] = effective_workers
+            result["gpu_worker_reductions"] = reductions
+            for worker_result in worker_results:
+                rows = worker_result["rows"]
+                total_selected_patches += len(rows)
+                if rows:
+                    total_valid_patches += int(rows[0]["local_valid_patch_count"])
+        else:
+            for bytes_data, sample_id, metadata, source_shard, source_index in measured:
+                image = open_rgb_image(bytes_data)
+                rows, _ = select_patches_from_image(
+                    image=image,
+                    sample_id=sample_id,
+                    metadata=metadata,
+                    cfg=cfg,
+                    source_shard=source_shard,
+                    source_index=source_index,
+                )
+                total_selected_patches += len(rows)
+                if rows:
+                    total_valid_patches += int(rows[0]["local_valid_patch_count"])
     except Exception as exc:
         result["error"] = f"Backend '{backend}' failed during timed execution: {exc}"
         return result

@@ -45,6 +45,8 @@ In the current implementation:
     - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
     - computes slide-level stain normalization statistics on the full source image by default
     - can batch the descriptor stage on GPU with `--descriptor_backend cucim`
+    - can process images with multiple worker processes via `--num_workers`
+    - can reduce `cucim` worker count after GPU OOM with `--auto_reduce_gpu_workers`
     - adds neighborhood/interface features from adjacent patches
     - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
     - keeps a role-based local coreset per image:
@@ -76,6 +78,17 @@ python -m patchselect local-select --descriptor_backend cucim ...
 ```
 
 The GPU path is designed for the descriptor stage and uses a `cuCIM/CuPy` stack. The current environment in this workspace does not have those packages installed, so the backend will report as unavailable until you install them in your CUDA-matched environment.
+
+For multiprocessing:
+
+```bash
+python -m patchselect local-select --num_workers 8 ...
+python -m patchselect local-select --descriptor_backend cucim --num_workers 8 --gpu_ids 0,1,2,3 --auto_reduce_gpu_workers ...
+```
+
+The GPU retry logic is chunk-based: if a `cucim` chunk OOMs, `patchselect` retries that chunk with one fewer worker and keeps the lower worker count for subsequent chunks.
+
+Multiprocessing requires a normal local Python environment. Restricted sandboxes may block worker process creation, in which case `patchselect` will tell you to rerun with `--num_workers 1`.
 
 ## Descriptor
 
@@ -116,8 +129,11 @@ Local candidate generation:
    --data_dir Data ^
    --output_dir patchselect/out/local_selection ^
    --split train ^
-   --descriptor_backend cucim ^
-   --rle_min_fraction 0.75 ^
+    --descriptor_backend cucim ^
+    --num_workers 8 ^
+    --gpu_ids 0,1,2,3 ^
+    --auto_reduce_gpu_workers ^
+    --rle_min_fraction 0.75 ^
    --local_keep_ratio 0.10 ^
    --local_keep_max 4 ^
    --semantic_weight 0.50 ^
@@ -155,6 +171,7 @@ python -m patchselect benchmark ^
   --split train ^
   --limit_images 8 ^
   --warmup_images 1 ^
+  --num_workers 4 ^
   --backend both ^
   --output_json patchselect/out/benchmark_backend.json
 ```
