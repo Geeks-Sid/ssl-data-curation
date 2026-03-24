@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,8 @@ from patchselect.selection import (
     compute_local_scores,
     role_based_local_selection,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def image_to_rgb_array(image: Image.Image) -> np.ndarray:
@@ -55,10 +58,25 @@ def select_patches_from_image(
     source_shard: str,
     source_index: int,
 ) -> tuple[list[dict], list[tuple[np.ndarray, dict]]]:
+    logger.debug(
+        "Selecting patches for sample=%s shard=%s index=%d.",
+        sample_id,
+        Path(source_shard).name,
+        source_index,
+    )
     rgb = image_to_rgb_array(image)
     rle_mask = None
     if cfg.use_rle_mask:
         rle_mask = decode_rle_mask(metadata.get("rle_mask"), rgb.shape[0], rgb.shape[1])
+    logger.debug(
+        "Sample=%s image_shape=%sx%s patch_size=%d stride=%d rle_mask=%s.",
+        sample_id,
+        rgb.shape[1],
+        rgb.shape[0],
+        cfg.patch_size,
+        cfg.patch_stride,
+        "present" if rle_mask is not None else "absent",
+    )
     slide_stats = compute_slide_stats_for_backend(rgb, cfg, foreground_mask=rle_mask)
     starts_y = tile_starts(rgb.shape[0], cfg.patch_size, cfg.patch_stride)
     starts_x = tile_starts(rgb.shape[1], cfg.patch_size, cfg.patch_stride)
@@ -72,6 +90,7 @@ def select_patches_from_image(
     candidate_patches: list[np.ndarray] = []
     candidate_masks: list[np.ndarray | None] = []
     patch_index = 0
+    skipped_by_rle = 0
     for grid_row, top in enumerate(starts_y):
         for grid_col, left in enumerate(starts_x):
             patch = rgb[top : top + cfg.patch_size, left : left + cfg.patch_size]
@@ -85,6 +104,7 @@ def select_patches_from_image(
                     float(patch_rle_mask.mean()) if patch_rle_mask.size else 0.0
                 )
                 if patch_rle_fraction < cfg.rle_min_fraction:
+                    skipped_by_rle += 1
                     continue
             candidate_patches.append(patch)
             candidate_masks.append(patch_rle_mask)
@@ -113,7 +133,18 @@ def select_patches_from_image(
             patch_index += 1
 
     if not candidate_records:
+        logger.debug(
+            "Sample=%s produced no candidate patches after tiling. skipped_by_rle=%d.",
+            sample_id,
+            skipped_by_rle,
+        )
         return [], []
+    logger.debug(
+        "Sample=%s candidate_patches=%d skipped_by_rle=%d.",
+        sample_id,
+        len(candidate_records),
+        skipped_by_rle,
+    )
 
     descriptors = compute_patch_descriptors_for_backend(
         candidate_patches,
@@ -129,6 +160,11 @@ def select_patches_from_image(
         records.append(record)
 
     if not records:
+        logger.debug(
+            "Sample=%s had %d candidates but no valid descriptors.",
+            sample_id,
+            len(candidate_records),
+        )
         return [], []
 
     add_neighborhood_features(records)
@@ -136,6 +172,12 @@ def select_patches_from_image(
     selected = role_based_local_selection(records, cfg)
     selected.sort(key=lambda item: item["selection_rank"])
     total_valid = len(records)
+    logger.info(
+        "Sample=%s valid_patches=%d selected=%d.",
+        sample_id,
+        total_valid,
+        len(selected),
+    )
 
     selected_rows = []
     selected_patches = []
@@ -205,4 +247,10 @@ def save_selected_patch(
         image.save(out_path, quality=cfg.jpeg_quality)
     else:
         image.save(out_path)
+    logger.debug(
+        "Saved selected patch for sample=%s rank=%s to %s.",
+        record["sample_id"],
+        record["selection_rank"],
+        out_path,
+    )
     return out_path

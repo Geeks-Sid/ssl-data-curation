@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -17,12 +18,16 @@ from patchselect.arrow_utils import (
 from patchselect.config import PatchSelectionConfig
 from patchselect.io_utils import write_json, write_rows_part
 from patchselect.local_worker import config_to_payload, process_image_task
+from patchselect.logging_utils import add_logging_args, configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run local stain-aware patch selection on Arrow shards."
     )
+    add_logging_args(parser)
     parser.add_argument(
         "--data_dir", default="Data", help="Directory containing .arrow shards"
     )
@@ -219,6 +224,11 @@ def build_task(
 
 
 def run_tasks_once(tasks: list[dict], worker_count: int) -> dict:
+    logger.debug(
+        "Dispatching chunk with %d task(s) using %d worker(s).",
+        len(tasks),
+        worker_count,
+    )
     if worker_count <= 1:
         results = [process_image_task(task) for task in tasks]
         for result in results:
@@ -254,10 +264,25 @@ def process_chunk_with_retries(
     current_workers = max(1, min(worker_count, len(tasks)))
     reductions = 0
     while True:
+        logger.info(
+            "Processing chunk of %d image(s) with %d worker(s)%s.",
+            len(tasks),
+            current_workers,
+            " with GPU auto-reduction enabled" if allow_gpu_reduction else "",
+        )
         outcome = run_tasks_once(tasks, current_workers)
         if outcome["status"] == "ok":
+            logger.debug(
+                "Chunk completed successfully with %d worker(s).", current_workers
+            )
             return outcome["results"], current_workers, reductions
         if outcome["status"] == "oom" and allow_gpu_reduction and current_workers > 1:
+            sample_id = outcome["result"].get("sample_id", "unknown")
+            logger.warning(
+                "OOM while processing sample %s. Retrying chunk with %d worker(s).",
+                sample_id,
+                current_workers - 1,
+            )
             current_workers -= 1
             reductions += 1
             continue
@@ -273,6 +298,11 @@ def flush_rows_if_needed(
 ) -> int:
     if len(rows) < flush_rows:
         return row_part_index
+    logger.info(
+        "Flushing %d local candidate row(s) to parquet part %d.",
+        len(rows),
+        row_part_index,
+    )
     row_part_index = write_rows_part(
         rows, output_dir / "candidates", "local_candidates", row_part_index
     )
@@ -282,6 +312,7 @@ def flush_rows_if_needed(
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.log_level)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     patch_dir = (
@@ -314,6 +345,15 @@ def main() -> None:
     )
 
     files = discover_arrow_files(Path(args.data_dir), split=args.split)
+    logger.info(
+        "Starting local selection over %d shard(s) from %s with backend=%s, workers=%d, chunk_size=%d, log_level=%s.",
+        len(files),
+        args.data_dir,
+        args.descriptor_backend,
+        args.num_workers,
+        args.chunk_size,
+        args.log_level,
+    )
     rows: list[dict] = []
     row_part_index = 0
     processed_images = 0
@@ -324,6 +364,7 @@ def main() -> None:
     task_counter = 0
 
     for shard_path in files:
+        logger.info("Loading shard %s.", shard_path)
         dataset = load_arrow_shard(shard_path)
         progress = tqdm(desc=f"Processing {shard_path.name}", unit="img")
         chunk_tasks: list[dict] = []
@@ -333,6 +374,11 @@ def main() -> None:
 
             bytes_data = item.get("jpg", {}).get("bytes")
             if not bytes_data:
+                logger.debug(
+                    "Skipping %s[%d] because no jpg bytes are present.",
+                    shard_path.name,
+                    source_index,
+                )
                 skipped_images += 1
                 processed_images += 1
                 progress.update(1)
@@ -343,6 +389,13 @@ def main() -> None:
             gpu_id = None
             if gpu_ids:
                 gpu_id = gpu_ids[task_counter % len(gpu_ids)]
+            logger.debug(
+                "Queueing sample %s from shard=%s index=%d gpu=%s.",
+                sample_id,
+                shard_path.name,
+                source_index,
+                gpu_id if gpu_id is not None else "cpu",
+            )
             chunk_tasks.append(
                 build_task(
                     cfg=cfg,
@@ -374,8 +427,17 @@ def main() -> None:
                 if result["rows"]:
                     rows.extend(result["rows"])
                     selected_patches += len(result["rows"])
+                    logger.debug(
+                        "Sample %s produced %d selected patch row(s).",
+                        result["sample_id"],
+                        len(result["rows"]),
+                    )
                 else:
                     skipped_images += 1
+                    logger.debug(
+                        "Sample %s produced no retained patches.",
+                        result["sample_id"],
+                    )
             progress.set_postfix(
                 {
                     "selected": selected_patches,
@@ -418,10 +480,22 @@ def main() -> None:
             )
 
         progress.close()
+        logger.info(
+            "Finished shard %s. Processed=%d skipped=%d selected_patches=%d.",
+            shard_path.name,
+            processed_images,
+            skipped_images,
+            selected_patches,
+        )
         if args.limit_images is not None and processed_images >= args.limit_images:
             break
 
     if rows:
+        logger.info(
+            "Final flush of %d remaining local candidate row(s) to parquet part %d.",
+            len(rows),
+            row_part_index,
+        )
         row_part_index = write_rows_part(
             rows, output_dir / "candidates", "local_candidates", row_part_index
         )
@@ -437,6 +511,7 @@ def main() -> None:
         "config": vars(args),
     }
     write_json(output_dir / "run_summary.json", summary)
+    logger.info("Wrote local selection summary to %s.", output_dir / "run_summary.json")
     print(
         f"Processed {processed_images} images, selected {selected_patches} patches, "
         f"wrote {row_part_index} parquet parts using {current_worker_count} worker(s)."

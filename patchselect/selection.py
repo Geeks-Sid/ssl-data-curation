@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from patchselect.constants import (
     SEMANTIC_FEATURE_INDICES,
 )
 from patchselect.io_utils import write_dataframe_part
+
+logger = logging.getLogger(__name__)
 
 
 def base_idx(name: str) -> int:
@@ -338,6 +341,10 @@ def serialize_bin_key(bin_key: tuple[str, ...]) -> str:
 def count_bin_frequencies(
     candidate_files: list[Path], bin_columns: tuple[str, ...]
 ) -> Counter[tuple[str, ...]]:
+    logger.info(
+        "Counting global-selection bins across %d candidate parquet file(s).",
+        len(candidate_files),
+    )
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
     counts: Counter[tuple[str, ...]] = Counter()
     for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
@@ -354,6 +361,7 @@ def allocate_bin_quotas(
     min_quota: int,
 ) -> dict[tuple[str, ...], int]:
     if not counts:
+        logger.warning("No candidate bins were found; quota allocation is empty.")
         return {}
     bins = list(counts.keys())
     if target_size <= 0:
@@ -397,7 +405,17 @@ def allocate_bin_quotas(
                 quotas[idx] += 1
                 remainder -= 1
 
-    return {bins[idx]: int(quotas[idx]) for idx in range(len(bins))}
+    result = {bins[idx]: int(quotas[idx]) for idx in range(len(bins))}
+    logger.info(
+        "Allocated quotas for %d bin(s) targeting %d selected row(s).",
+        len(result),
+        target_size,
+    )
+    logger.debug(
+        "Largest quota allocations: %s",
+        sorted(result.items(), key=lambda item: item[1], reverse=True)[:10],
+    )
+    return result
 
 
 def partition_candidates(
@@ -406,6 +424,12 @@ def partition_candidates(
     bin_columns: tuple[str, ...],
 ) -> dict[str, tuple[str, ...]]:
     partition_root.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Partitioning %d candidate parquet file(s) into %s using columns=%s.",
+        len(candidate_files),
+        partition_root,
+        ",".join(bin_columns),
+    )
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
     part_index = 0
     key_lookup: dict[str, tuple[str, ...]] = {}
@@ -434,6 +458,7 @@ def partition_candidates(
         pd.DataFrame(mapping_rows).to_parquet(
             partition_root / "partition_map.parquet", index=False
         )
+    logger.info("Wrote %d partition bin mapping row(s).", len(mapping_rows))
     return key_lookup
 
 
@@ -463,6 +488,12 @@ def select_top_by_bin(
         if frame.empty:
             continue
         frame = frame.nlargest(quota, utility_column)
+        logger.debug(
+            "Selecting %d row(s) from bin=%s into output part %d.",
+            len(frame),
+            bin_key,
+            out_index,
+        )
         part_path = output_dir / f"final_selection_part-{out_index:06d}.parquet"
         write_dataframe_part(frame, part_path)
         written += len(frame)
@@ -475,6 +506,11 @@ def run_global_selection(
     output_dir: Path,
     config: GlobalSelectionConfig,
 ) -> dict[str, int]:
+    logger.info(
+        "Starting global selection with target_size=%d utility_column=%s.",
+        config.target_size,
+        config.utility_column,
+    )
     counts = count_bin_frequencies(candidate_files, config.bin_columns)
     quotas = allocate_bin_quotas(
         counts=counts,
@@ -492,6 +528,11 @@ def run_global_selection(
         key_lookup=key_lookup,
         output_dir=output_dir / "final_selection",
         utility_column=config.utility_column,
+    )
+    logger.info(
+        "Global selection completed with %d selected row(s) across %d bin(s).",
+        selected_rows,
+        len(counts),
     )
     return {
         "candidate_files": len(candidate_files),

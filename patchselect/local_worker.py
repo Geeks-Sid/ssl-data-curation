@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import gc
+import logging
 from dataclasses import asdict
 from pathlib import Path
 
 from patchselect.arrow_utils import open_rgb_image
 from patchselect.config import PatchSelectionConfig
 from patchselect.pipeline import save_selected_patch, select_patches_from_image
+
+logger = logging.getLogger(__name__)
 
 
 def config_to_payload(cfg: PatchSelectionConfig) -> dict:
@@ -56,6 +59,13 @@ def process_image_task(task: dict) -> dict:
     cfg = config_from_payload(task["cfg"])
     gpu_id = task.get("gpu_id")
     try:
+        logger.debug(
+            "Worker starting sample=%s source_index=%s backend=%s gpu=%s.",
+            task["sample_id"],
+            task["source_index"],
+            cfg.descriptor_backend,
+            gpu_id if gpu_id is not None else "cpu",
+        )
         set_gpu_device(gpu_id)
         image = open_rgb_image(task["bytes_data"])
         rows, patch_records = select_patches_from_image(
@@ -76,6 +86,11 @@ def process_image_task(task: dict) -> dict:
             "source_index": task["source_index"],
             "rows": rows,
         }
+        logger.debug(
+            "Worker completed sample=%s with %d selected row(s).",
+            task["sample_id"],
+            len(rows),
+        )
     except Exception as exc:
         result = {
             "status": "oom" if is_oom_error(exc) else "error",
@@ -83,6 +98,11 @@ def process_image_task(task: dict) -> dict:
             "source_index": task["source_index"],
             "message": f"{type(exc).__name__}: {exc}",
         }
+        logger.exception(
+            "Worker failed for sample=%s with status=%s.",
+            task["sample_id"],
+            result["status"],
+        )
     finally:
         if cfg.descriptor_backend == "cucim":
             free_gpu_memory()

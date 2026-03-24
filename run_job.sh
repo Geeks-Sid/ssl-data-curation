@@ -1,0 +1,1 @@
+python main.py local-select --data_dir ./Dummy --output_dir ./output --split train  --descriptor_backend cucim  --num_workers 1  --gpu_ids 0  --auto_reduce_gpu_workers  --rle_min_fraction 0.75 --local_keep_ratio 0.10 --local_keep_max 4 --semantic_weight 0.50 --interface_weight 0.30 --redundancy_weight 0.20 --nuisance_weight 0.35

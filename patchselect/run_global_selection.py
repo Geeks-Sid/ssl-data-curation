@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from patchselect.config import GlobalSelectionConfig
 from patchselect.export_tars import export_selected_patches_to_tars
 from patchselect.io_utils import write_json
+from patchselect.logging_utils import add_logging_args, configure_logging
 from patchselect.selection import run_global_selection
+
+logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run global balancing over local patch candidates."
     )
+    add_logging_args(parser)
     parser.add_argument(
         "--candidate_dir",
         default="patchselect/out/local_selection/candidates",
@@ -97,10 +102,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    configure_logging(args.log_level)
     candidate_dir = Path(args.candidate_dir)
     candidate_files = sorted(candidate_dir.glob("*.parquet"))
     if not candidate_files:
         raise FileNotFoundError(f"No parquet candidate files found in {candidate_dir}")
+    logger.info(
+        "Starting global selection from %d candidate parquet file(s) in %s with log_level=%s.",
+        len(candidate_files),
+        candidate_dir,
+        args.log_level,
+    )
 
     config = GlobalSelectionConfig(
         target_size=args.target_size,
@@ -116,6 +128,7 @@ def main() -> None:
     result = run_global_selection(candidate_files, output_dir, config)
     tar_result = None
     if args.export_tars:
+        logger.info("Tar export requested; scanning final selection parquet files.")
         final_selection_dir = output_dir / "final_selection"
         final_selection_files = sorted(final_selection_dir.glob("*.parquet"))
         if final_selection_files:
@@ -133,7 +146,15 @@ def main() -> None:
                 default_patch_size=args.tar_default_patch_size,
                 compression=args.tar_compression,
             )
+            logger.info(
+                "Tar export completed with %d written member(s) across %d tar file(s).",
+                tar_result["written_members"],
+                tar_result["tar_count"],
+            )
         else:
+            logger.warning(
+                "Tar export requested but no final selection parquet files were produced."
+            )
             tar_result = {
                 "final_selection_files": 0,
                 "tar_count": 0,
@@ -151,6 +172,7 @@ def main() -> None:
     if tar_result is not None:
         summary["tar_export"] = tar_result
     write_json(output_dir / "run_summary.json", summary)
+    logger.info("Wrote global selection summary to %s.", output_dir / "run_summary.json")
     message = f"Global selection complete: {result['selected_rows']} rows selected across {result['bin_count']} bins."
     if tar_result is not None:
         message += f" Tar export wrote {tar_result['written_members']} patches across {tar_result['tar_count']} tar files."
