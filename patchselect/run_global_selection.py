@@ -6,27 +6,92 @@ import argparse
 from pathlib import Path
 
 from patchselect.config import GlobalSelectionConfig
+from patchselect.export_tars import export_selected_patches_to_tars
 from patchselect.io_utils import write_json
 from patchselect.selection import run_global_selection
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run global balancing over local patch candidates.")
+    parser = argparse.ArgumentParser(
+        description="Run global balancing over local patch candidates."
+    )
     parser.add_argument(
         "--candidate_dir",
         default="patchselect/out/local_selection/candidates",
         help="Directory containing local candidate parquet files",
     )
-    parser.add_argument("--output_dir", default="patchselect/out/global_selection", help="Output directory")
-    parser.add_argument("--target_size", type=int, required=True, help="Target number of final selected patches")
+    parser.add_argument(
+        "--output_dir",
+        default="patchselect/out/global_selection",
+        help="Output directory",
+    )
+    parser.add_argument(
+        "--target_size",
+        type=int,
+        required=True,
+        help="Target number of final selected patches",
+    )
     parser.add_argument(
         "--bin_columns",
         default="tissue,is_cancer,state_bin,interface_bin",
         help="Comma-separated column list used for balancing",
     )
-    parser.add_argument("--bin_alpha", type=float, default=0.5, help="Tempering coefficient for bin quotas")
-    parser.add_argument("--min_quota", type=int, default=0, help="Optional minimum quota per non-empty bin")
-    parser.add_argument("--utility_column", default="objective_score", help="Column used for within-bin ranking")
+    parser.add_argument(
+        "--bin_alpha",
+        type=float,
+        default=0.5,
+        help="Tempering coefficient for bin quotas",
+    )
+    parser.add_argument(
+        "--min_quota",
+        type=int,
+        default=0,
+        help="Optional minimum quota per non-empty bin",
+    )
+    parser.add_argument(
+        "--utility_column",
+        default="objective_score",
+        help="Column used for within-bin ranking",
+    )
+    parser.add_argument(
+        "--export_tars",
+        action="store_true",
+        help="Pack final selected patches into tar archives grouped by source Arrow shard",
+    )
+    parser.add_argument(
+        "--data_dir",
+        default=None,
+        help="Optional Arrow shard directory used to resolve source_shard paths during tar export",
+    )
+    parser.add_argument(
+        "--tar_output_dir",
+        default=None,
+        help="Optional output directory for tar archives; defaults to <output_dir>/final_selection_tars",
+    )
+    parser.add_argument(
+        "--tar_image_format",
+        default="jpg",
+        choices=("jpg", "jpeg", "png"),
+        help="Patch encoding format for tar members",
+    )
+    parser.add_argument(
+        "--tar_jpeg_quality",
+        type=int,
+        default=95,
+        help="JPEG quality used when tar members are written as jpg/jpeg",
+    )
+    parser.add_argument(
+        "--tar_default_patch_size",
+        type=int,
+        default=256,
+        help="Fallback crop size when patch_size is absent from a final manifest row",
+    )
+    parser.add_argument(
+        "--tar_compression",
+        default="none",
+        choices=("none", "gz"),
+        help="Tar compression mode; plain .tar is the default",
+    )
     return parser.parse_args()
 
 
@@ -39,7 +104,9 @@ def main() -> None:
 
     config = GlobalSelectionConfig(
         target_size=args.target_size,
-        bin_columns=tuple(column.strip() for column in args.bin_columns.split(",") if column.strip()),
+        bin_columns=tuple(
+            column.strip() for column in args.bin_columns.split(",") if column.strip()
+        ),
         bin_alpha=args.bin_alpha,
         utility_column=args.utility_column,
         per_bin_min_quota=args.min_quota,
@@ -47,14 +114,47 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     result = run_global_selection(candidate_files, output_dir, config)
+    tar_result = None
+    if args.export_tars:
+        final_selection_dir = output_dir / "final_selection"
+        final_selection_files = sorted(final_selection_dir.glob("*.parquet"))
+        if final_selection_files:
+            tar_output_dir = (
+                Path(args.tar_output_dir)
+                if args.tar_output_dir
+                else output_dir / "final_selection_tars"
+            )
+            tar_result = export_selected_patches_to_tars(
+                final_selection_files=final_selection_files,
+                output_dir=tar_output_dir,
+                data_dir=Path(args.data_dir) if args.data_dir else None,
+                image_format=args.tar_image_format,
+                jpeg_quality=args.tar_jpeg_quality,
+                default_patch_size=args.tar_default_patch_size,
+                compression=args.tar_compression,
+            )
+        else:
+            tar_result = {
+                "final_selection_files": 0,
+                "tar_count": 0,
+                "selected_rows": 0,
+                "written_members": 0,
+                "compression": args.tar_compression,
+                "image_format": args.tar_image_format,
+                "jpeg_quality": args.tar_jpeg_quality,
+                "default_patch_size": args.tar_default_patch_size,
+            }
     summary = {
         "config": vars(args),
         **result,
     }
+    if tar_result is not None:
+        summary["tar_export"] = tar_result
     write_json(output_dir / "run_summary.json", summary)
-    print(
-        f"Global selection complete: {result['selected_rows']} rows selected across {result['bin_count']} bins."
-    )
+    message = f"Global selection complete: {result['selected_rows']} rows selected across {result['bin_count']} bins."
+    if tar_result is not None:
+        message += f" Tar export wrote {tar_result['written_members']} patches across {tar_result['tar_count']} tar files."
+    print(message)
 
 
 if __name__ == "__main__":

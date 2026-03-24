@@ -17,6 +17,7 @@ setup(
             "patchselect-export=patchselect.export_images:main",
             "patchselect-local=patchselect.run_local_selection:main",
             "patchselect-global=patchselect.run_global_selection:main",
+            "patchselect-pack-tars=patchselect.export_tars:main",
         ]
     },
 )

@@ -56,16 +56,22 @@ In the current implementation:
      - `rare_state`
 
 2. `global-select`
-   - reads locally selected candidate parquet files
-   - rebalances the candidate pool over metadata groups and semantic/interface bins
-   - writes final parquet shards for downstream training
+    - reads locally selected candidate parquet files
+    - rebalances the candidate pool over metadata groups and semantic/interface bins
+    - writes final parquet shards for downstream training
+    - can optionally pack the final selected crops into image-only tar archives grouped by source Arrow shard
 
 3. `export-images`
-    - helper for full-image inspection from Arrow shards
+     - helper for full-image inspection from Arrow shards
 
-4. `benchmark`
-    - measures the full local-selection path on identical images for `cpu` vs `cucim`
-    - supports either Arrow-backed samples or synthetic fallback images
+4. `pack-tars`
+     - packs the final selected manifest into `.tar` or `.tar.gz` archives
+     - writes one archive per source Arrow shard
+     - stores patch images only, with no JSON metadata sidecars
+
+5. `benchmark`
+     - measures the full local-selection path on identical images for `cpu` vs `cucim`
+     - supports either Arrow-backed samples or synthetic fallback images
 
 ## Backends
 
@@ -150,7 +156,20 @@ python -m patchselect global-select ^
   --output_dir patchselect/out/global_selection ^
   --target_size 10000000 ^
   --bin_columns tissue,is_cancer,state_bin,interface_bin ^
-  --bin_alpha 0.5
+  --bin_alpha 0.5 ^
+  --export_tars ^
+  --data_dir Data
+```
+
+Tar packing from an existing final-selection manifest:
+
+```bash
+python -m patchselect pack-tars ^
+  --final_selection_dir patchselect/out/global_selection/final_selection ^
+  --output_dir patchselect/out/global_selection/final_selection_tars ^
+  --data_dir Data ^
+  --image_format jpg ^
+  --compression none
 ```
 
 Full-image export for inspection:
@@ -203,6 +222,12 @@ Each row contains:
 - `patchselect/out/global_selection/final_selection/`
 
 These final parquet shards can be used as a training manifest for an on-demand crop loader, or converted into exported patch files if needed.
+
+If `--export_tars` is enabled during `global-select`, or if you run `pack-tars` afterward, `patchselect` also writes:
+
+- `patchselect/out/global_selection/final_selection_tars/`
+
+By default, this directory contains one plain `.tar` archive per source Arrow shard. Each tar stores only patch image members, which fits common WebDataset-style SSL training setups. No JSON sidecars are written inside the tar archives.
 
 ## Recommended Evaluation Framing
 

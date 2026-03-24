@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from datasets import Dataset
 from datasets import Image as HFImage
 from datasets import load_dataset
 from PIL import Image
@@ -44,12 +45,15 @@ def discover_arrow_files(data_dir: Path, split: str = "all") -> list[Path]:
 
 
 def load_arrow_shard(path: Path):
-    dataset = load_dataset(
-        "arrow",
-        data_files=[str(path)],
-        split="train",
-        keep_in_memory=False,
-    )
+    try:
+        dataset = Dataset.from_file(str(path))
+    except Exception:
+        dataset = load_dataset(
+            "arrow",
+            data_files=[str(path)],
+            split="train",
+            keep_in_memory=False,
+        )
     return dataset.cast_column("jpg", HFImage(decode=False))
 
 

@@ -48,6 +48,7 @@ class GlobalSelectionConfig:
             "source_shard",
             "source_index",
             "patch_index",
+            "patch_size",
             "patch_x",
             "patch_y",
             "grid_row",
