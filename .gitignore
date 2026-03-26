@@ -1,2 +1,8 @@
 Dummy/hpa10m-train-00000-of-16613.arrow
 Miniconda3-latest-Linux-x86_64.sh
+out/*
+tests/__pycache__/*
+output/*
+benchmark_logs.txt
+*.txt
+logs_cpu_112.txt

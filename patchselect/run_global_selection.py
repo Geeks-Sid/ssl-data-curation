@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         help="Pack final selected patches into tar archives grouped by source Arrow shard",
     )
     parser.add_argument(
+        "--export_patches",
+        dest="export_tars",
+        action="store_true",
+        help="Alias for --export_tars; enables post-selection patch materialization",
+    )
+    parser.add_argument(
         "--data_dir",
         default=None,
         help="Optional Arrow shard directory used to resolve source_shard paths during tar export",
@@ -71,13 +77,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tar_output_dir",
         default=None,
-        help="Optional output directory for tar archives; defaults to <output_dir>/final_selection_tars",
+        help="Optional output directory for tar archives and exporter working files; defaults to <output_dir>/final_selection_tars",
+    )
+    parser.add_argument(
+        "--tar_output_mode",
+        default="tar",
+        choices=("tar", "files", "both"),
+        help="Whether exported selected patches are written as tar archives, loose image files, or both",
+    )
+    parser.add_argument(
+        "--tar_image_output_dir",
+        default=None,
+        help="Optional output directory for loose patch image files when --tar_output_mode is files/both",
     )
     parser.add_argument(
         "--tar_image_format",
         default="jpg",
         choices=("jpg", "jpeg", "png"),
-        help="Patch encoding format for tar members",
+        help="Patch encoding format for tar members and loose patch files",
     )
     parser.add_argument(
         "--tar_jpeg_quality",
@@ -145,10 +162,17 @@ def main() -> None:
                 jpeg_quality=args.tar_jpeg_quality,
                 default_patch_size=args.tar_default_patch_size,
                 compression=args.tar_compression,
+                output_mode=args.tar_output_mode,
+                image_output_dir=(
+                    Path(args.tar_image_output_dir)
+                    if args.tar_image_output_dir
+                    else None
+                ),
             )
             logger.info(
-                "Tar export completed with %d written member(s) across %d tar file(s).",
+                "Patch export completed with %d tar member(s), %d loose image file(s), across %d tar file(s).",
                 tar_result["written_members"],
+                tar_result["written_files"],
                 tar_result["tar_count"],
             )
         else:
@@ -160,10 +184,15 @@ def main() -> None:
                 "tar_count": 0,
                 "selected_rows": 0,
                 "written_members": 0,
+                "written_files": 0,
+                "output_mode": args.tar_output_mode,
                 "compression": args.tar_compression,
                 "image_format": args.tar_image_format,
                 "jpeg_quality": args.tar_jpeg_quality,
                 "default_patch_size": args.tar_default_patch_size,
+                "image_output_dir": (
+                    args.tar_image_output_dir if args.tar_image_output_dir else ""
+                ),
             }
     summary = {
         "config": vars(args),
@@ -175,7 +204,13 @@ def main() -> None:
     logger.info("Wrote global selection summary to %s.", output_dir / "run_summary.json")
     message = f"Global selection complete: {result['selected_rows']} rows selected across {result['bin_count']} bins."
     if tar_result is not None:
-        message += f" Tar export wrote {tar_result['written_members']} patches across {tar_result['tar_count']} tar files."
+        message += (
+            " Patch export wrote "
+            f"{tar_result['written_members']} tar member(s)"
+        )
+        if tar_result["written_files"] > 0:
+            message += f" and {tar_result['written_files']} loose image file(s)"
+        message += f" across {tar_result['tar_count']} tar file(s)."
     print(message)
 
 

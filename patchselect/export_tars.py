@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import io
+import logging
 import tarfile
 from pathlib import Path
 
@@ -19,6 +21,17 @@ from patchselect.arrow_utils import (
     slugify,
 )
 from patchselect.io_utils import write_dataframe_part, write_json
+
+logger = logging.getLogger(__name__)
+
+
+def parse_image_format(value: str) -> str:
+    normalized = value.strip().lower().lstrip(".")
+    if normalized not in {"jpg", "jpeg", "png"}:
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from 'jpg', 'jpeg', 'png')"
+        )
+    return normalized
 
 
 def shard_token(source_shard: str) -> str:
@@ -45,6 +58,11 @@ def build_patch_member_name(row: dict, image_format: str) -> str:
     )
 
 
+def build_patch_output_path(row: dict, output_dir: Path, image_format: str) -> Path:
+    shard_dir = output_dir / shard_token(str(row.get("source_shard", "arrow_shard")))
+    return shard_dir / build_patch_member_name(row, image_format=image_format)
+
+
 def resolve_shard_path(
     source_shard: str, data_dir: Path | None, lookup: dict[str, Path]
 ) -> Path:
@@ -61,9 +79,15 @@ def resolve_shard_path(
 def build_data_dir_lookup(data_dir: Path | None) -> dict[str, Path]:
     if data_dir is None:
         return {}
-    return {
-        path.name.lower(): path for path in discover_arrow_files(data_dir, split="all")
-    }
+    try:
+        files = discover_arrow_files(data_dir, split="all")
+    except FileNotFoundError:
+        logger.warning(
+            "No .arrow files found under data_dir=%s; tar export will rely on source_shard paths stored in the manifest.",
+            data_dir,
+        )
+        return {}
+    return {path.name.lower(): path for path in files}
 
 
 def encode_patch_image(
@@ -122,32 +146,40 @@ def partition_final_selection_by_shard(
     return token_to_shard
 
 
-def export_partition_to_tar(
+def export_partition_assets(
     partition_files: list[Path],
     resolved_shard_path: Path,
-    tar_path: Path,
+    tar_path: Path | None,
+    image_output_dir: Path | None,
     image_format: str,
     jpeg_quality: int,
     default_patch_size: int,
     compression: str,
 ) -> dict[str, int]:
+    if tar_path is None and image_output_dir is None:
+        raise ValueError("At least one export target must be configured")
+
     frame = (
         ds.dataset([str(path) for path in partition_files], format="parquet")
         .to_table()
         .to_pandas()
     )
     if frame.empty:
-        return {"selected_rows": 0, "written_members": 0}
+        return {"selected_rows": 0, "written_members": 0, "written_files": 0}
 
     frame = frame.sort_values(
         ["source_index", "patch_index", "patch_y", "patch_x"]
     ).reset_index(drop=True)
     dataset = load_arrow_shard(resolved_shard_path)
-    tar_path.parent.mkdir(parents=True, exist_ok=True)
-    tar_mode = "w:gz" if compression == "gz" else "w"
     written_members = 0
+    written_files = 0
 
-    with tarfile.open(tar_path, tar_mode) as archive:
+    with ExitStack() as stack:
+        archive = None
+        if tar_path is not None:
+            tar_path.parent.mkdir(parents=True, exist_ok=True)
+            tar_mode = "w:gz" if compression == "gz" else "w"
+            archive = stack.enter_context(tarfile.open(tar_path, tar_mode))
         current_source_index = None
         current_image = None
 
@@ -177,17 +209,30 @@ def export_partition_to_tar(
             encoded = encode_patch_image(
                 patch, image_format=image_format, jpeg_quality=jpeg_quality
             )
-            member_name = build_patch_member_name(
-                row._asdict(), image_format=image_format
-            )
-            info = tarfile.TarInfo(name=member_name)
-            info.size = len(encoded)
-            info.mtime = 0
-            info.mode = 0o644
-            archive.addfile(info, io.BytesIO(encoded))
-            written_members += 1
+            row_dict = row._asdict()
 
-    return {"selected_rows": int(len(frame)), "written_members": written_members}
+            if archive is not None:
+                member_name = build_patch_member_name(row_dict, image_format=image_format)
+                info = tarfile.TarInfo(name=member_name)
+                info.size = len(encoded)
+                info.mtime = 0
+                info.mode = 0o644
+                archive.addfile(info, io.BytesIO(encoded))
+                written_members += 1
+
+            if image_output_dir is not None:
+                output_path = build_patch_output_path(
+                    row_dict, output_dir=image_output_dir, image_format=image_format
+                )
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(encoded)
+                written_files += 1
+
+    return {
+        "selected_rows": int(len(frame)),
+        "written_members": written_members,
+        "written_files": written_files,
+    }
 
 
 def export_selected_patches_to_tars(
@@ -198,20 +243,27 @@ def export_selected_patches_to_tars(
     jpeg_quality: int,
     default_patch_size: int,
     compression: str = "none",
+    output_mode: str = "tar",
+    image_output_dir: Path | None = None,
 ) -> dict[str, int]:
     if not final_selection_files:
         raise FileNotFoundError(
             "No final selection parquet files provided for tar export"
         )
+    if output_mode not in {"tar", "files", "both"}:
+        raise ValueError(f"Unsupported output_mode={output_mode!r}")
 
     partition_root = output_dir / "shard_partitions"
     token_to_shard = partition_final_selection_by_shard(
         final_selection_files, partition_root
     )
     data_dir_lookup = build_data_dir_lookup(data_dir)
+    if output_mode in {"files", "both"} and image_output_dir is None:
+        image_output_dir = output_dir / "debug_images"
 
     tar_count = 0
     written_members = 0
+    written_files = 0
     selected_rows = 0
     shard_summaries: list[dict[str, str | int]] = []
 
@@ -223,40 +275,53 @@ def export_selected_patches_to_tars(
         resolved_shard_path = resolve_shard_path(
             source_shard, data_dir=data_dir, lookup=data_dir_lookup
         )
-        tar_path = output_dir / build_tar_name(source_shard, compression=compression)
-        shard_result = export_partition_to_tar(
+        tar_path = None
+        if output_mode in {"tar", "both"}:
+            tar_path = output_dir / build_tar_name(source_shard, compression=compression)
+        shard_result = export_partition_assets(
             partition_files=partition_files,
             resolved_shard_path=resolved_shard_path,
             tar_path=tar_path,
+            image_output_dir=image_output_dir,
             image_format=image_format,
             jpeg_quality=jpeg_quality,
             default_patch_size=default_patch_size,
             compression=compression,
         )
-        if shard_result["written_members"] <= 0:
+        if (
+            shard_result["written_members"] <= 0
+            and shard_result["written_files"] <= 0
+        ):
             continue
-        tar_count += 1
+        if tar_path is not None and shard_result["written_members"] > 0:
+            tar_count += 1
         written_members += shard_result["written_members"]
+        written_files += shard_result["written_files"]
         selected_rows += shard_result["selected_rows"]
         shard_summaries.append(
             {
                 "source_shard": source_shard,
                 "resolved_source_shard": str(resolved_shard_path),
-                "tar_path": str(tar_path),
+                "tar_path": str(tar_path) if tar_path is not None else "",
+                "image_output_dir": str(image_output_dir) if image_output_dir else "",
                 "selected_rows": shard_result["selected_rows"],
                 "written_members": shard_result["written_members"],
+                "written_files": shard_result["written_files"],
             }
         )
 
     summary = {
         "final_selection_files": len(final_selection_files),
+        "output_mode": output_mode,
         "tar_count": tar_count,
         "selected_rows": selected_rows,
         "written_members": written_members,
+        "written_files": written_files,
         "compression": compression,
         "image_format": image_format,
         "jpeg_quality": jpeg_quality,
         "default_patch_size": default_patch_size,
+        "image_output_dir": str(image_output_dir) if image_output_dir else "",
     }
     write_json(
         output_dir / "tar_export_summary.json", {**summary, "shards": shard_summaries}
@@ -266,7 +331,7 @@ def export_selected_patches_to_tars(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Pack globally selected patches into tar archives grouped by source Arrow shard."
+        description="Export globally selected patches grouped by source Arrow shard."
     )
     parser.add_argument(
         "--final_selection_dir",
@@ -276,7 +341,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         default="patchselect/out/global_selection/final_selection_tars",
-        help="Output directory for tar archives",
+        help="Output directory for tar archives and exporter working files",
     )
     parser.add_argument(
         "--data_dir",
@@ -285,9 +350,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--image_format",
+        type=parse_image_format,
         default="jpg",
-        choices=("jpg", "jpeg", "png"),
-        help="Patch encoding format inside each tar archive",
+        help="Patch encoding format for tar members and loose image exports",
     )
     parser.add_argument(
         "--jpeg_quality",
@@ -306,6 +371,17 @@ def parse_args() -> argparse.Namespace:
         default="none",
         choices=("none", "gz"),
         help="Tar compression mode. Plain .tar is the default and works well for WebDataset-style loaders.",
+    )
+    parser.add_argument(
+        "--output_mode",
+        default="tar",
+        choices=("tar", "files", "both"),
+        help="Whether to write tar archives, loose patch image files, or both",
+    )
+    parser.add_argument(
+        "--image_output_dir",
+        default=None,
+        help="Optional output directory for loose patch image files; defaults to <output_dir>/debug_images",
     )
     return parser.parse_args()
 
@@ -327,10 +403,18 @@ def main() -> None:
         jpeg_quality=args.jpeg_quality,
         default_patch_size=args.default_patch_size,
         compression=args.compression,
+        output_mode=args.output_mode,
+        image_output_dir=Path(args.image_output_dir) if args.image_output_dir else None,
     )
-    print(
-        f"Tar export complete: {result['written_members']} patches written across {result['tar_count']} tar files."
+    message = (
+        "Patch export complete: "
+        f"{result['selected_rows']} selected rows produced "
+        f"{result['written_members']} tar member(s) across {result['tar_count']} tar file(s)"
     )
+    if result["written_files"] > 0:
+        message += f" and {result['written_files']} loose image file(s)"
+    message += "."
+    print(message)
 
 
 if __name__ == "__main__":

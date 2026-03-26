@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from collections import Counter
 from pathlib import Path
@@ -23,6 +21,9 @@ from patchselect.constants import (
 from patchselect.io_utils import write_dataframe_part
 
 logger = logging.getLogger(__name__)
+
+BIN_KEY_SEPARATOR = "\x1f"
+FINAL_SELECTION_PART_ROWS = 100_000
 
 
 def base_idx(name: str) -> int:
@@ -326,40 +327,45 @@ def role_based_local_selection(
     return [records[idx] for idx in selected]
 
 
-def bin_key_from_row(row: pd.Series, bin_columns: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        "" if pd.isna(row[column]) else str(row[column]) for column in bin_columns
-    )
-
-
-def serialize_bin_key(bin_key: tuple[str, ...]) -> str:
-    raw = json.dumps(bin_key, sort_keys=False)
-    digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
-    return digest
+def build_key_series(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
+    if not columns:
+        return pd.Series([""] * len(frame), index=frame.index, dtype="string")
+    normalized = frame.loc[:, list(columns)].copy()
+    for column in columns:
+        normalized[column] = normalized[column].astype("string").fillna("")
+    key_series = normalized[columns[0]]
+    for column in columns[1:]:
+        key_series = key_series.str.cat(normalized[column], sep=BIN_KEY_SEPARATOR)
+    return key_series
 
 
 def count_bin_frequencies(
     candidate_files: list[Path], bin_columns: tuple[str, ...]
-) -> Counter[tuple[str, ...]]:
+) -> Counter[str]:
     logger.info(
         "Counting global-selection bins across %d candidate parquet file(s).",
         len(candidate_files),
     )
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
-    counts: Counter[tuple[str, ...]] = Counter()
+    if not bin_columns:
+        return Counter({"": int(dataset.count_rows())})
+
+    counts: Counter[str] = Counter()
     for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
         frame = batch.to_pandas()
-        for row in frame.itertuples(index=False, name=None):
-            counts[tuple("" if value is None else str(value) for value in row)] += 1
+        if frame.empty:
+            continue
+        batch_counts = build_key_series(frame, bin_columns).value_counts(sort=False)
+        counts.update({str(key): int(value) for key, value in batch_counts.items()})
     return counts
 
 
 def allocate_bin_quotas(
-    counts: Counter[tuple[str, ...]],
+    counts: Counter[str],
     target_size: int,
     alpha: float,
     min_quota: int,
-) -> dict[tuple[str, ...], int]:
+) -> dict[str, int]:
     if not counts:
         logger.warning("No candidate bins were found; quota allocation is empty.")
         return {}
@@ -418,87 +424,107 @@ def allocate_bin_quotas(
     return result
 
 
-def partition_candidates(
-    candidate_files: list[Path],
-    partition_root: Path,
-    bin_columns: tuple[str, ...],
-) -> dict[str, tuple[str, ...]]:
-    partition_root.mkdir(parents=True, exist_ok=True)
-    logger.info(
-        "Partitioning %d candidate parquet file(s) into %s using columns=%s.",
-        len(candidate_files),
-        partition_root,
-        ",".join(bin_columns),
+def resolve_selection_columns(
+    dataset: ds.Dataset, config: GlobalSelectionConfig
+) -> list[str]:
+    available = set(dataset.schema.names)
+    required = set(config.bin_columns) | {config.utility_column}
+    missing = sorted(column for column in required if column not in available)
+    if missing:
+        raise KeyError(
+            "Missing required candidate column(s) for global selection: "
+            + ", ".join(missing)
+        )
+    requested = list(
+        dict.fromkeys(
+            [
+                *config.metadata_columns,
+                *config.bin_columns,
+                config.utility_column,
+            ]
+        )
     )
-    dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
-    part_index = 0
-    key_lookup: dict[str, tuple[str, ...]] = {}
+    columns = [column for column in requested if column in available]
+    logger.info(
+        "Global selection will scan %d column(s): %s",
+        len(columns),
+        ",".join(columns),
+    )
+    return columns
 
-    for batch in dataset.to_batches():
-        frame = batch.to_pandas()
+
+def flush_selected_frames(
+    frames: list[pd.DataFrame], output_dir: Path, out_index: int
+) -> tuple[int, int]:
+    frame = pd.concat(frames, ignore_index=True, copy=False)
+    part_path = output_dir / f"final_selection_part-{out_index:06d}.parquet"
+    write_dataframe_part(frame, part_path)
+    return out_index + 1, int(len(frame))
+
+
+def write_selected_frames(
+    selected_by_bin: dict[str, pd.DataFrame], output_dir: Path
+) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    buffer: list[pd.DataFrame] = []
+    buffer_rows = 0
+    out_index = 0
+    written = 0
+    for frame in selected_by_bin.values():
         if frame.empty:
             continue
-        frame["_bin_key"] = frame.apply(
-            lambda row: bin_key_from_row(row, bin_columns), axis=1
-        )
-        for bin_key, group in frame.groupby("_bin_key", sort=False):
-            token = serialize_bin_key(bin_key)
-            key_lookup[token] = bin_key
-            out_dir = partition_root / token
-            out_dir.mkdir(parents=True, exist_ok=True)
-            part_path = out_dir / f"part-{part_index:06d}.parquet"
-            write_dataframe_part(group.drop(columns="_bin_key"), part_path)
-            part_index += 1
-
-    mapping_rows = [
-        {"partition": token, "bin_key": json.dumps(list(bin_key))}
-        for token, bin_key in key_lookup.items()
-    ]
-    if mapping_rows:
-        pd.DataFrame(mapping_rows).to_parquet(
-            partition_root / "partition_map.parquet", index=False
-        )
-    logger.info("Wrote %d partition bin mapping row(s).", len(mapping_rows))
-    return key_lookup
+        if buffer_rows and buffer_rows + len(frame) > FINAL_SELECTION_PART_ROWS:
+            out_index, rows_written = flush_selected_frames(buffer, output_dir, out_index)
+            written += rows_written
+            buffer = []
+            buffer_rows = 0
+        buffer.append(frame)
+        buffer_rows += len(frame)
+    if buffer:
+        out_index, rows_written = flush_selected_frames(buffer, output_dir, out_index)
+        written += rows_written
+    return written
 
 
 def select_top_by_bin(
-    partition_root: Path,
-    quotas: dict[tuple[str, ...], int],
-    key_lookup: dict[str, tuple[str, ...]],
+    candidate_files: list[Path],
+    quotas: dict[str, int],
     output_dir: Path,
-    utility_column: str,
+    config: GlobalSelectionConfig,
 ) -> int:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    written = 0
-    out_index = 0
-    for token, bin_key in key_lookup.items():
-        quota = quotas.get(bin_key, 0)
-        if quota <= 0:
-            continue
-        partition_dir = partition_root / token
-        files = sorted(partition_dir.glob("*.parquet"))
-        if not files:
-            continue
-        frame = (
-            ds.dataset([str(path) for path in files], format="parquet")
-            .to_table()
-            .to_pandas()
-        )
+    dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
+    columns = resolve_selection_columns(dataset, config)
+    selected_by_bin: dict[str, pd.DataFrame] = {}
+    scanned_rows = 0
+
+    for batch in dataset.scanner(columns=columns).to_batches():
+        frame = batch.to_pandas()
         if frame.empty:
             continue
-        frame = frame.nlargest(quota, utility_column)
-        logger.debug(
-            "Selecting %d row(s) from bin=%s into output part %d.",
-            len(frame),
-            bin_key,
-            out_index,
-        )
-        part_path = output_dir / f"final_selection_part-{out_index:06d}.parquet"
-        write_dataframe_part(frame, part_path)
-        written += len(frame)
-        out_index += 1
-    return written
+        scanned_rows += len(frame)
+        frame["_bin_key"] = build_key_series(frame, config.bin_columns)
+        for bin_key, group in frame.groupby("_bin_key", sort=False):
+            quota = quotas.get(str(bin_key), 0)
+            if quota <= 0:
+                continue
+            candidate_frame = group.drop(columns="_bin_key")
+            if len(candidate_frame) > quota:
+                candidate_frame = candidate_frame.nlargest(quota, config.utility_column)
+            current = selected_by_bin.get(str(bin_key))
+            if current is None:
+                selected_by_bin[str(bin_key)] = candidate_frame.reset_index(drop=True)
+                continue
+            merged = pd.concat([current, candidate_frame], ignore_index=True, copy=False)
+            if len(merged) > quota:
+                merged = merged.nlargest(quota, config.utility_column)
+            selected_by_bin[str(bin_key)] = merged.reset_index(drop=True)
+
+    logger.info(
+        "Scanned %d candidate row(s) and retained provisional top-k rows for %d bin(s).",
+        scanned_rows,
+        len(selected_by_bin),
+    )
+    return write_selected_frames(selected_by_bin, output_dir)
 
 
 def run_global_selection(
@@ -518,16 +544,11 @@ def run_global_selection(
         alpha=config.bin_alpha,
         min_quota=config.per_bin_min_quota,
     )
-    partition_root = output_dir / config.partition_dir_name
-    key_lookup = partition_candidates(
-        candidate_files, partition_root, config.bin_columns
-    )
     selected_rows = select_top_by_bin(
-        partition_root=partition_root,
+        candidate_files=candidate_files,
         quotas=quotas,
-        key_lookup=key_lookup,
         output_dir=output_dir / "final_selection",
-        utility_column=config.utility_column,
+        config=config,
     )
     logger.info(
         "Global selection completed with %d selected row(s) across %d bin(s).",

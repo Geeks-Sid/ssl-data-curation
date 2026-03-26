@@ -45,6 +45,7 @@ class GlobalSelectionConfig:
     metadata_columns: tuple[str, ...] = field(
         default_factory=lambda: (
             "sample_id",
+            "sample_slug",
             "source_shard",
             "source_index",
             "patch_index",

@@ -39,39 +39,134 @@ In the current implementation:
 ## Workflow
 
 1. `local-select`
-    - loads Arrow shards one image at a time
-    - tiles each image into `256x256` patches
-    - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
-    - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
-    - computes slide-level stain normalization statistics on the full source image by default
-    - can batch the descriptor stage on GPU with `--descriptor_backend cucim`
-    - can process images with multiple worker processes via `--num_workers`
-    - can reduce `cucim` worker count after GPU OOM with `--auto_reduce_gpu_workers`
-    - adds neighborhood/interface features from adjacent patches
-    - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
-    - keeps a role-based local coreset per image:
-      - `prototype`
-      - `positive_tail`
-     - `interface`
-     - `rare_state`
+   - loads Arrow shards one image at a time
+   - tiles each image into `256x256` patches
+   - optionally decodes image-level `rle_mask` metadata and skips patches with less than `75%` foreground overlap
+   - computes a target-label-free descriptor for every non-empty patch at full patch resolution by default
+   - computes slide-level stain normalization statistics on the full source image by default
+   - can batch the descriptor stage on GPU with `--descriptor_backend cucim`
+   - can process images with multiple worker processes via `--num_workers`
+   - can reduce `cucim` worker count after GPU OOM with `--auto_reduce_gpu_workers`
+   - adds neighborhood/interface features from adjacent patches
+   - scores each patch with semantic coverage, interface gain, redundancy penalty, nuisance score, and final objective
+   - keeps a role-based local coreset per image:
+   - `prototype`
+   - `positive_tail`
+   - `interface`
+   - `rare_state`
 
 2. `global-select`
-    - reads locally selected candidate parquet files
-    - rebalances the candidate pool over metadata groups and semantic/interface bins
-    - writes final parquet shards for downstream training
-    - can optionally pack the final selected crops into image-only tar archives grouped by source Arrow shard
+   - reads locally selected candidate parquet files
+   - rebalances the candidate pool over metadata groups and semantic/interface bins
+   - writes final parquet shards for downstream training
+   - can optionally pack the final selected crops into image-only tar archives grouped by source Arrow shard
 
 3. `export-images`
-     - helper for full-image inspection from Arrow shards
+   - helper for full-image inspection from Arrow shards
 
 4. `pack-tars`
-     - packs the final selected manifest into `.tar` or `.tar.gz` archives
-     - writes one archive per source Arrow shard
-     - stores patch images only, with no JSON metadata sidecars
+   - exports the final selected manifest into `.tar`, `.tar.gz`, loose image files, or both
+   - groups outputs by source Arrow shard
+   - stores patch images only, with no JSON metadata sidecars
 
 5. `benchmark`
-     - measures the full local-selection path on identical images for `cpu` vs `cucim`
-     - supports either Arrow-backed samples or synthetic fallback images
+   - measures the full local-selection path on identical images for `cpu` vs `cucim`
+   - supports either Arrow-backed samples or synthetic fallback images
+
+## Stage Inputs And Outputs
+
+### 1. `local-select`
+
+Input:
+
+- a directory of Arrow shards, typically `Data/*.arrow`
+- each Arrow row is expected to include image bytes under `jpg.bytes`
+- optional metadata in `json` / `custom_metadata`, including fields like `md5`, `gene`, `tissue`, `cell_type`, `diagnosis`, `is_cancer`
+- optional image-level `rle_mask` metadata for foreground pre-filtering
+
+Output:
+
+- parquet parts under `patchselect/out/local_selection/candidates/`
+- optional debug crops under `patchselect/out/local_selection/selected_patches/` when `--save_selected_patches` is enabled
+- a run summary JSON at `patchselect/out/local_selection/run_summary.json`
+
+What one output row represents:
+
+- one retained patch from one source image
+- the patch coordinates and source identifiers needed to recrop later
+- normalized metadata fields
+- local role assignment such as `prototype` or `interface`
+- local objective terms and all descriptor features
+
+### 2. `global-select`
+
+Input:
+
+- parquet candidate files from `local-select`
+- balancing configuration such as `--target_size`, `--bin_columns`, `--bin_alpha`, and `--utility_column`
+
+Output:
+
+- final parquet manifest shards under `patchselect/out/global_selection/final_selection/`
+- a run summary JSON at `patchselect/out/global_selection/run_summary.json`
+- optional tar archives and/or loose patch image files under `patchselect/out/global_selection/final_selection_tars/` when `--export_tars` is enabled
+
+What one output row represents:
+
+- one globally retained patch chosen from the local candidate pool
+- the same patch-level manifest fields from `local-select`, now filtered to the globally balanced final set
+
+### 3. `pack-tars`
+
+Input:
+
+- final-selection parquet manifest files from `global-select`
+- access to the source Arrow shards, either via stored `source_shard` paths or `--data_dir`
+
+Output:
+
+- one `.tar` or `.tar.gz` file per source Arrow shard under `patchselect/out/global_selection/final_selection_tars/` when tar output is enabled
+- optional loose image files under `patchselect/out/global_selection/final_selection_tars/debug_images/` when file output is enabled
+- a tar export summary JSON at `patchselect/out/global_selection/final_selection_tars/tar_export_summary.json`
+
+What each tar contains:
+
+- image patch files only
+- filenames encoding sample slug, source index, patch index, and crop coordinates
+- no JSON sidecars or metadata payloads inside the tar
+
+### 4. `export-images`
+
+Input:
+
+- a directory of Arrow shards
+
+Output:
+
+- full exported images for inspection under `out/exported_images/` or your chosen `--output_dir`
+
+What each output file represents:
+
+- one original image row copied out of the Arrow dataset for manual inspection
+
+### 5. `benchmark`
+
+Input:
+
+- either Arrow-backed images or synthetic images
+- one or both descriptor backends: `cpu`, `cucim`
+
+Output:
+
+- timing and throughput metrics printed to stdout
+- optional benchmark JSON when `--output_json` is provided
+- optional worker-scaling plot when `--output_plot` is provided
+
+What the output summarizes:
+
+- end-to-end local-selection runtime for the chosen backend configuration
+- comparable measurements across CPU and GPU backends on the same image set
+- worker-scaling curves so you can compare CPU vs GPU behavior and identify the best worker count
 
 ## Backends
 
@@ -172,6 +267,18 @@ python -m patchselect pack-tars ^
   --compression none
 ```
 
+Loose debug image export:
+
+```bash
+python -m patchselect pack-tars ^
+  --final_selection_dir patchselect/out/global_selection/final_selection ^
+  --output_dir patchselect/out/global_selection/final_selection_tars ^
+  --data_dir Data ^
+  --output_mode files ^
+  --image_output_dir patchselect/out/global_selection/final_selection_debug_images ^
+  --image_format jpg
+```
+
 Full-image export for inspection:
 
 ```bash
@@ -190,9 +297,10 @@ python -m patchselect benchmark ^
   --split train ^
   --limit_images 8 ^
   --warmup_images 1 ^
-  --num_workers 4 ^
+  --worker_counts 1,2,4,8 ^
   --backend both ^
-  --output_json patchselect/out/benchmark_backend.json
+  --output_json patchselect/out/benchmark_backend.json ^
+  --output_plot patchselect/out/benchmark_backend_scaling.png
 ```
 
 ## Output
@@ -228,6 +336,8 @@ If `--export_tars` is enabled during `global-select`, or if you run `pack-tars` 
 - `patchselect/out/global_selection/final_selection_tars/`
 
 By default, this directory contains one plain `.tar` archive per source Arrow shard. Each tar stores only patch image members, which fits common WebDataset-style SSL training setups. No JSON sidecars are written inside the tar archives.
+
+For debugging, you can switch to loose image export with `--output_mode files` or write both tar archives and loose files with `--output_mode both`. Loose files are grouped by source shard under the configured image output directory.
 
 ## Recommended Evaluation Framing
 

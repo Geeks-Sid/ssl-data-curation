@@ -18,8 +18,28 @@ from PIL import Image
 
 
 def discover_arrow_files(data_dir: Path, split: str = "all") -> list[Path]:
-    files = sorted(data_dir.glob("*.arrow"))
+    data_dir = Path(data_dir)
+    if data_dir.is_file():
+        if data_dir.suffix.lower() != ".arrow":
+            raise FileNotFoundError(f"Expected an .arrow file, got {data_dir}")
+        files = [data_dir]
+    else:
+        files = sorted(data_dir.glob("*.arrow"))
+        if not files:
+            files = sorted(data_dir.rglob("*.arrow"))
     if not files:
+        parquet_files = []
+        if data_dir.exists() and data_dir.is_dir():
+            parquet_files = sorted(data_dir.rglob("*.parquet"))
+        if parquet_files:
+            raise FileNotFoundError(
+                "No .arrow files found in "
+                f"{data_dir}. This command expects source Arrow shards, but the "
+                "provided directory contains Parquet manifests instead. "
+                "If this is the output of global-select, point --data_dir at the "
+                "original Arrow dataset directory. If you want to export selected "
+                "patches from the Parquet manifest, use pack-tars."
+            )
         raise FileNotFoundError(f"No .arrow files found in {data_dir}")
 
     split = split.lower()
