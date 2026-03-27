@@ -6,3 +6,6 @@ output/*
 benchmark_logs.txt
 *.txt
 logs_cpu_112.txt
+__pycache__/
+output_full/*
+out_full/*

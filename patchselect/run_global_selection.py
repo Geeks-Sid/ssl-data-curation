@@ -59,6 +59,17 @@ def parse_args() -> argparse.Namespace:
         help="Column used for within-bin ranking",
     )
     parser.add_argument(
+        "--dataframe_backend",
+        default="auto",
+        choices=("auto", "pandas", "cudf"),
+        help="Tabular backend for global selection. 'auto' uses cuDF when available, otherwise pandas.",
+    )
+    parser.add_argument(
+        "--no_progress",
+        action="store_true",
+        help="Disable tqdm progress bars for the global selection and tar export passes.",
+    )
+    parser.add_argument(
         "--export_tars",
         action="store_true",
         help="Pack final selected patches into tar archives grouped by source Arrow shard",
@@ -114,6 +125,18 @@ def parse_args() -> argparse.Namespace:
         choices=("none", "gz"),
         help="Tar compression mode; plain .tar is the default",
     )
+    parser.add_argument(
+        "--tar_num_workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for shard-level tar export parallelism",
+    )
+    parser.add_argument(
+        "--tar_max_images_per_tar",
+        type=int,
+        default=None,
+        help="Optional cap on image members per tar; large shards are split into numbered tar chunks",
+    )
     return parser.parse_args()
 
 
@@ -138,6 +161,8 @@ def main() -> None:
         ),
         bin_alpha=args.bin_alpha,
         utility_column=args.utility_column,
+        dataframe_backend=args.dataframe_backend,
+        show_progress=not args.no_progress,
         per_bin_min_quota=args.min_quota,
     )
     output_dir = Path(args.output_dir)
@@ -168,12 +193,16 @@ def main() -> None:
                     if args.tar_image_output_dir
                     else None
                 ),
+                num_workers=args.tar_num_workers,
+                max_images_per_tar=args.tar_max_images_per_tar,
+                show_progress=not args.no_progress,
             )
             logger.info(
-                "Patch export completed with %d tar member(s), %d loose image file(s), across %d tar file(s).",
+                "Patch export completed with %d tar member(s), %d loose image file(s), across %d tar file(s) using %d worker(s).",
                 tar_result["written_members"],
                 tar_result["written_files"],
                 tar_result["tar_count"],
+                tar_result["num_workers"],
             )
         else:
             logger.warning(
@@ -190,6 +219,8 @@ def main() -> None:
                 "image_format": args.tar_image_format,
                 "jpeg_quality": args.tar_jpeg_quality,
                 "default_patch_size": args.tar_default_patch_size,
+                "num_workers": args.tar_num_workers,
+                "max_images_per_tar": args.tar_max_images_per_tar or 0,
                 "image_output_dir": (
                     args.tar_image_output_dir if args.tar_image_output_dir else ""
                 ),

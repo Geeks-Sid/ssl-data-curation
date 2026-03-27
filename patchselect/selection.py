@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import heapq
 import logging
+import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
+from tqdm.auto import tqdm
 
 from patchselect.config import GlobalSelectionConfig, PatchSelectionConfig
 from patchselect.constants import (
@@ -24,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 BIN_KEY_SEPARATOR = "\x1f"
 FINAL_SELECTION_PART_ROWS = 100_000
+
+try:
+    import cudf
+except ImportError:  # pragma: no cover - exercised only when RAPIDS is unavailable.
+    cudf = None
 
 
 def base_idx(name: str) -> int:
@@ -339,33 +348,195 @@ def build_key_series(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series
     return key_series
 
 
+def normalize_bin_value(value: Any) -> Any:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def make_bin_key(values: Any, columns: tuple[str, ...]) -> tuple[Any, ...]:
+    if not columns:
+        return tuple()
+    if len(columns) == 1:
+        values = (values,)
+    return tuple(normalize_bin_value(value) for value in values)
+
+
+def group_counts_to_counter(grouped: pd.DataFrame, columns: tuple[str, ...]) -> Counter[tuple[Any, ...]]:
+    counts: Counter[tuple[Any, ...]] = Counter()
+    if grouped.empty:
+        return counts
+    for row in grouped.itertuples(index=False, name=None):
+        key_values = row[:-1]
+        counts[make_bin_key(key_values, columns)] += int(row[-1])
+    return counts
+
+
+def is_cudf_string_dtype(dtype: Any) -> bool:
+    dtype_name = str(dtype).lower()
+    return "str" in dtype_name or "object" in dtype_name
+
+
+def prepare_cudf_group_columns(frame: Any, columns: tuple[str, ...]) -> list[str]:
+    group_columns: list[str] = []
+    for idx, column in enumerate(columns):
+        if is_cudf_string_dtype(frame[column].dtype):
+            encoded_column = f"__bin_code_{idx}"
+            frame[encoded_column] = frame[column].astype("category").cat.codes.astype(
+                "int32"
+            )
+            group_columns.append(encoded_column)
+        else:
+            group_columns.append(column)
+    return group_columns
+
+
+def resolve_dataframe_backend(requested: str) -> str:
+    backend = requested.lower()
+    if backend not in {"auto", "pandas", "cudf"}:
+        raise ValueError(f"Unsupported dataframe backend: {requested}")
+    if backend == "auto":
+        return "cudf" if cudf is not None else "pandas"
+    if backend == "cudf" and cudf is None:
+        raise ImportError(
+            "Global selection requested dataframe_backend='cudf', but cudf is not installed."
+        )
+    return backend
+
+
+def count_bin_frequencies_pandas(
+    dataset: ds.Dataset, bin_columns: tuple[str, ...]
+) -> Counter[tuple[Any, ...]]:
+    if not bin_columns:
+        return Counter({tuple(): int(dataset.count_rows())})
+
+    counts: Counter[tuple[Any, ...]] = Counter()
+    for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
+        frame = batch.to_pandas()
+        if frame.empty:
+            continue
+        batch_counts = (
+            frame.groupby(list(bin_columns), dropna=False, sort=False)
+            .size()
+            .reset_index(name="_count")
+        )
+        counts.update(group_counts_to_counter(batch_counts, bin_columns))
+    return counts
+
+
+def count_bin_frequencies_cudf(
+    dataset: ds.Dataset, bin_columns: tuple[str, ...]
+) -> Counter[tuple[Any, ...]]:
+    if not bin_columns:
+        return Counter({tuple(): int(dataset.count_rows())})
+
+    counts: Counter[tuple[Any, ...]] = Counter()
+    for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
+        frame = cudf.DataFrame.from_arrow(batch)
+        if len(frame) == 0:
+            continue
+        group_columns = prepare_cudf_group_columns(frame, bin_columns)
+        batch_counts = (
+            frame.groupby(group_columns, dropna=False)
+            .size()
+            .reset_index(name="_count")
+        )
+        representatives = (
+            frame[group_columns + list(bin_columns)]
+            .drop_duplicates(subset=group_columns, keep="first")
+        )
+        batch_counts = batch_counts.merge(representatives, on=group_columns, how="left")
+        counts.update(
+            group_counts_to_counter(
+                batch_counts[list(bin_columns) + ["_count"]].to_pandas(),
+                bin_columns,
+            )
+        )
+    return counts
+
+
 def count_bin_frequencies(
-    candidate_files: list[Path], bin_columns: tuple[str, ...]
-) -> Counter[str]:
+    candidate_files: list[Path], bin_columns: tuple[str, ...], backend: str = "pandas"
+) -> Counter[tuple[Any, ...]]:
     logger.info(
         "Counting global-selection bins across %d candidate parquet file(s).",
         len(candidate_files),
     )
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
-    if not bin_columns:
-        return Counter({"": int(dataset.count_rows())})
+    if backend == "cudf":
+        return count_bin_frequencies_cudf(dataset, bin_columns)
+    return count_bin_frequencies_pandas(dataset, bin_columns)
 
-    counts: Counter[str] = Counter()
-    for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
-        frame = batch.to_pandas()
-        if frame.empty:
-            continue
-        batch_counts = build_key_series(frame, bin_columns).value_counts(sort=False)
-        counts.update({str(key): int(value) for key, value in batch_counts.items()})
-    return counts
+
+def count_bin_frequencies_with_progress(
+    dataset: ds.Dataset,
+    bin_columns: tuple[str, ...],
+    backend: str,
+    show_progress: bool,
+) -> Counter[tuple[Any, ...]]:
+    total_rows = int(dataset.count_rows())
+    progress = maybe_make_progress(
+        total=total_rows,
+        desc="Counting global bins",
+        unit="rows",
+        enabled=show_progress,
+    )
+    try:
+        if not bin_columns:
+            return Counter({tuple(): total_rows})
+
+        counts: Counter[tuple[Any, ...]] = Counter()
+        for batch in dataset.scanner(columns=list(bin_columns)).to_batches():
+            if backend == "cudf":
+                frame = cudf.DataFrame.from_arrow(batch)
+                if len(frame) == 0:
+                    continue
+                group_columns = prepare_cudf_group_columns(frame, bin_columns)
+                batch_counts = (
+                    frame.groupby(group_columns, dropna=False)
+                    .size()
+                    .reset_index(name="_count")
+                )
+                representatives = (
+                    frame[group_columns + list(bin_columns)]
+                    .drop_duplicates(subset=group_columns, keep="first")
+                )
+                batch_counts = batch_counts.merge(
+                    representatives, on=group_columns, how="left"
+                )
+                counts.update(
+                    group_counts_to_counter(
+                        batch_counts[list(bin_columns) + ["_count"]].to_pandas(),
+                        bin_columns,
+                    )
+                )
+            else:
+                frame = batch.to_pandas()
+                if frame.empty:
+                    continue
+                batch_counts = (
+                    frame.groupby(list(bin_columns), dropna=False, sort=False)
+                    .size()
+                    .reset_index(name="_count")
+                )
+                counts.update(group_counts_to_counter(batch_counts, bin_columns))
+            if progress is not None:
+                progress.update(batch.num_rows)
+                progress.set_postfix({"bins": len(counts)})
+        return counts
+    finally:
+        if progress is not None:
+            progress.close()
 
 
 def allocate_bin_quotas(
-    counts: Counter[str],
+    counts: Counter[tuple[Any, ...]],
     target_size: int,
     alpha: float,
     min_quota: int,
-) -> dict[str, int]:
+) -> dict[tuple[Any, ...], int]:
     if not counts:
         logger.warning("No candidate bins were found; quota allocation is empty.")
         return {}
@@ -453,6 +624,18 @@ def resolve_selection_columns(
     return columns
 
 
+def maybe_make_progress(
+    *,
+    total: int,
+    desc: str,
+    unit: str,
+    enabled: bool,
+) -> Any:
+    if not enabled or not sys.stderr.isatty():
+        return None
+    return tqdm(total=total, desc=desc, unit=unit)
+
+
 def flush_selected_frames(
     frames: list[pd.DataFrame], output_dir: Path, out_index: int
 ) -> tuple[int, int]:
@@ -486,45 +669,139 @@ def write_selected_frames(
     return written
 
 
+def write_selected_rows(selected_by_bin: dict[str, list[dict]], output_dir: Path) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    buffer: list[pd.DataFrame] = []
+    buffer_rows = 0
+    out_index = 0
+    written = 0
+    for rows in selected_by_bin.values():
+        if not rows:
+            continue
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            continue
+        if buffer_rows and buffer_rows + len(frame) > FINAL_SELECTION_PART_ROWS:
+            out_index, rows_written = flush_selected_frames(buffer, output_dir, out_index)
+            written += rows_written
+            buffer = []
+            buffer_rows = 0
+        buffer.append(frame)
+        buffer_rows += len(frame)
+    if buffer:
+        out_index, rows_written = flush_selected_frames(buffer, output_dir, out_index)
+        written += rows_written
+    return written
+
+
 def select_top_by_bin(
     candidate_files: list[Path],
-    quotas: dict[str, int],
+    quotas: dict[tuple[Any, ...], int],
     output_dir: Path,
     config: GlobalSelectionConfig,
+    backend: str = "pandas",
 ) -> int:
     dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
     columns = resolve_selection_columns(dataset, config)
-    selected_by_bin: dict[str, pd.DataFrame] = {}
+    selected_by_bin: dict[tuple[Any, ...], list[tuple[float, int, dict]]] = {}
     scanned_rows = 0
+    insertion_order = 0
+    progress = maybe_make_progress(
+        total=int(dataset.count_rows()),
+        desc="Selecting global top-k",
+        unit="rows",
+        enabled=config.show_progress,
+    )
 
-    for batch in dataset.scanner(columns=columns).to_batches():
-        frame = batch.to_pandas()
-        if frame.empty:
-            continue
-        scanned_rows += len(frame)
-        frame["_bin_key"] = build_key_series(frame, config.bin_columns)
-        for bin_key, group in frame.groupby("_bin_key", sort=False):
-            quota = quotas.get(str(bin_key), 0)
-            if quota <= 0:
-                continue
-            candidate_frame = group.drop(columns="_bin_key")
-            if len(candidate_frame) > quota:
-                candidate_frame = candidate_frame.nlargest(quota, config.utility_column)
-            current = selected_by_bin.get(str(bin_key))
-            if current is None:
-                selected_by_bin[str(bin_key)] = candidate_frame.reset_index(drop=True)
-                continue
-            merged = pd.concat([current, candidate_frame], ignore_index=True, copy=False)
-            if len(merged) > quota:
-                merged = merged.nlargest(quota, config.utility_column)
-            selected_by_bin[str(bin_key)] = merged.reset_index(drop=True)
+    try:
+        for batch in dataset.scanner(columns=columns).to_batches():
+            if backend == "cudf":
+                frame = cudf.DataFrame.from_arrow(batch)
+                if len(frame) == 0:
+                    continue
+                scanned_rows += len(frame)
+                if config.bin_columns:
+                    group_columns = prepare_cudf_group_columns(frame, config.bin_columns)
+                    grouped = frame.groupby(group_columns, dropna=False)
+                    group_iter = grouped
+                    grouped_on_bin_columns = True
+                else:
+                    pandas_frame = frame.to_pandas()
+                    pandas_frame["_bin_key"] = ""
+                    group_iter = pandas_frame.groupby("_bin_key", sort=False)
+                    grouped_on_bin_columns = False
+            else:
+                frame = batch.to_pandas()
+                if frame.empty:
+                    continue
+                scanned_rows += len(frame)
+                if config.bin_columns:
+                    group_iter = frame.groupby(
+                        list(config.bin_columns), dropna=False, sort=False
+                    )
+                    grouped_on_bin_columns = True
+                else:
+                    frame["_bin_key"] = ""
+                    group_iter = frame.groupby("_bin_key", sort=False)
+                    grouped_on_bin_columns = False
+            for group_key, group in group_iter:
+                candidate_frame = group.to_pandas() if backend == "cudf" else group
+                bin_key = (
+                    make_bin_key(
+                        tuple(candidate_frame.iloc[0][list(config.bin_columns)].tolist()),
+                        config.bin_columns,
+                    )
+                    if grouped_on_bin_columns
+                    else tuple()
+                )
+                quota = quotas.get(bin_key, 0)
+                if quota <= 0:
+                    continue
+                if not grouped_on_bin_columns:
+                    candidate_frame = candidate_frame.drop(columns="_bin_key")
+                if len(candidate_frame) > quota:
+                    candidate_frame = candidate_frame.nlargest(
+                        quota, config.utility_column
+                    )
+                heap = selected_by_bin.setdefault(bin_key, [])
+                for row in candidate_frame.to_dict("records"):
+                    score = float(row[config.utility_column])
+                    item = (score, insertion_order, row)
+                    insertion_order += 1
+                    if len(heap) < quota:
+                        heapq.heappush(heap, item)
+                        continue
+                    if item[:2] > heap[0][:2]:
+                        heapq.heapreplace(heap, item)
+            if progress is not None:
+                progress.update(batch.num_rows)
+                progress.set_postfix(
+                    {
+                        "bins": len(selected_by_bin),
+                        "kept": sum(len(heap) for heap in selected_by_bin.values()),
+                    }
+                )
+    finally:
+        if progress is not None:
+            progress.close()
 
     logger.info(
         "Scanned %d candidate row(s) and retained provisional top-k rows for %d bin(s).",
         scanned_rows,
         len(selected_by_bin),
     )
-    return write_selected_frames(selected_by_bin, output_dir)
+    finalized = {
+        bin_key: [
+            item[2]
+            for item in sorted(
+                heap,
+                key=lambda entry: (entry[0], entry[1]),
+                reverse=True,
+            )
+        ]
+        for bin_key, heap in selected_by_bin.items()
+    }
+    return write_selected_rows(finalized, output_dir)
 
 
 def run_global_selection(
@@ -532,12 +809,20 @@ def run_global_selection(
     output_dir: Path,
     config: GlobalSelectionConfig,
 ) -> dict[str, int]:
+    backend = resolve_dataframe_backend(config.dataframe_backend)
     logger.info(
-        "Starting global selection with target_size=%d utility_column=%s.",
+        "Starting global selection with target_size=%d utility_column=%s dataframe_backend=%s.",
         config.target_size,
         config.utility_column,
+        backend,
     )
-    counts = count_bin_frequencies(candidate_files, config.bin_columns)
+    dataset = ds.dataset([str(path) for path in candidate_files], format="parquet")
+    counts = count_bin_frequencies_with_progress(
+        dataset,
+        config.bin_columns,
+        backend=backend,
+        show_progress=config.show_progress,
+    )
     quotas = allocate_bin_quotas(
         counts=counts,
         target_size=config.target_size,
@@ -549,6 +834,7 @@ def run_global_selection(
         quotas=quotas,
         output_dir=output_dir / "final_selection",
         config=config,
+        backend=backend,
     )
     logger.info(
         "Global selection completed with %d selected row(s) across %d bin(s).",

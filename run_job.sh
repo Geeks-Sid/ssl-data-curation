@@ -1,9 +1,11 @@
-# Stage 1
-# python main.py local-select --data_dir ./Dummy --output_dir ./output --split train  --descriptor_backend cpu  --num_workers 112  --gpu_ids 0  --auto_reduce_gpu_workers  --rle_min_fraction 0.75 --local_keep_ratio 0.10 --local_keep_max 4 --semantic_weight 0.50 --interface_weight 0.30 --redundancy_weight 0.20 --nuisance_weight 0.35 >> logs_cpu_112.txt
+# 
+# Stage 1i
+export CUDA_VISIBLE_DEVICES=1
+# python main.py local-select --data_dir /mnt/d/IHC-found/Data --output_dir ./output_full --split train  --descriptor_backend cpu --num_workers 60 --gpu_ids 0  --auto_reduce_gpu_workers  --rle_min_fraction 0.75 --local_keep_ratio 0.10 --local_keep_max 16 --semantic_weight 0.50 --interface_weight 0.30 --redundancy_weight 0.20 --nuisance_weight 0.35 >> logs_cpu_112.txt
 # Stage 2
-# python main.py global-select --candidate_dir ./output/candidates --output_dir ./out/global_selection --target_size 1000 --bin_columns tissue,is_cancer,state_bin,interface_bin --bin_alpha 0.5 --export_tars --data_dir ./Dummy
+python main.py global-select --candidate_dir ./output_full/candidates --output_dir ./output_full/global_selection --target_size 100000 --bin_columns tissue,is_cancer,state_bin,interface_bin --bin_alpha 0.5 --data_dir /mnt/d/IHC-found/Data --export_tars --tar_num_workers 32 --tar_max_images_per_tar 1000
 # Stage 3
-python main.py pack-tars --final_selection_dir ./output/global_selection/final_selection --output_dir ./output/global_selection/final_selection_tars --data_dir Data --output_mode files --image_output_dir ./output/global_selection/final_selection_debug_images --image_format jpg
+# python main.py pack-tars --final_selection_dir ./output/global_selection/final_selection --output_dir ./output/global_selection/final_selection_tars --data_dir Data --output_mode files --image_output_dir ./output/global_selection/final_selection_debug_images --image_format jpg
 # Stage 4
 # export-images reads original Arrow shards, not global-selection parquet manifests
 # python main.py export-images --data_dir ./Dummy --output_dir patchselect/out/exported_images --split train --limit 500

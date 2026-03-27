@@ -40,6 +40,8 @@ class GlobalSelectionConfig:
     bin_columns: tuple[str, ...] = ("tissue", "is_cancer", "state_bin", "interface_bin")
     bin_alpha: float = 0.5
     utility_column: str = "objective_score"
+    dataframe_backend: str = "auto"
+    show_progress: bool = True
     partition_dir_name: str = "bin_partitions"
     per_bin_min_quota: int = 0
     metadata_columns: tuple[str, ...] = field(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -21,6 +22,7 @@ from patchselect.local_worker import config_to_payload, process_image_task
 from patchselect.logging_utils import add_logging_args, configure_logging
 
 logger = logging.getLogger(__name__)
+RESUME_STATE_PATH = "resume_state.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -262,6 +264,7 @@ def process_chunk_with_retries(
     allow_gpu_reduction: bool,
 ) -> tuple[list[dict], int, int]:
     current_workers = max(1, min(worker_count, len(tasks)))
+    persistent_worker_count = max(1, worker_count)
     reductions = 0
     while True:
         logger.info(
@@ -275,7 +278,7 @@ def process_chunk_with_retries(
             logger.debug(
                 "Chunk completed successfully with %d worker(s).", current_workers
             )
-            return outcome["results"], current_workers, reductions
+            return outcome["results"], persistent_worker_count, reductions
         if outcome["status"] == "oom" and allow_gpu_reduction and current_workers > 1:
             sample_id = outcome["result"].get("sample_id", "unknown")
             logger.warning(
@@ -284,6 +287,7 @@ def process_chunk_with_retries(
                 current_workers - 1,
             )
             current_workers -= 1
+            persistent_worker_count = current_workers
             reductions += 1
             continue
         result = outcome["result"]
@@ -308,6 +312,94 @@ def flush_rows_if_needed(
     )
     rows.clear()
     return row_part_index
+
+
+def build_resume_signature(
+    *,
+    cfg: PatchSelectionConfig,
+    files: list[Path],
+    limit_images: int | None,
+    save_selected_patches: bool,
+    selected_patch_dir: Path,
+) -> dict:
+    return {
+        "config": config_to_payload(cfg),
+        "limit_images": limit_images,
+        "save_selected_patches": save_selected_patches,
+        "selected_patch_dir": str(selected_patch_dir.resolve()),
+        "source_files": [str(path.resolve()) for path in files],
+    }
+
+
+def load_resume_state(output_dir: Path) -> dict | None:
+    state_path = output_dir / RESUME_STATE_PATH
+    if not state_path.exists():
+        return None
+    return json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def write_resume_state(output_dir: Path, state: dict) -> None:
+    write_json(output_dir / RESUME_STATE_PATH, state)
+
+
+def initialize_resume_state(output_dir: Path, signature: dict) -> dict:
+    existing_state = load_resume_state(output_dir)
+    if existing_state is None:
+        state = {
+            "completed": False,
+            "signature": signature,
+            "processed_images": 0,
+            "skipped_images": 0,
+            "selected_patches": 0,
+            "candidate_parts": 0,
+            "final_worker_count": 0,
+            "gpu_worker_reductions": 0,
+            "task_counter": 0,
+            "cursor": {"shard_index": 0, "next_source_index": 0},
+        }
+        write_resume_state(output_dir, state)
+        return state
+    if existing_state.get("signature") != signature:
+        raise RuntimeError(
+            "Existing local-select resume state does not match the current extraction "
+            "parameters. Use a new output directory or remove the previous outputs."
+        )
+    return existing_state
+
+
+def checkpoint_progress(
+    output_dir: Path,
+    state: dict,
+    *,
+    processed_images: int,
+    skipped_images: int,
+    selected_patches: int,
+    row_part_index: int,
+    current_worker_count: int,
+    worker_reductions: int,
+    task_counter: int,
+    shard_index: int,
+    next_source_index: int,
+    completed: bool = False,
+) -> dict:
+    state.update(
+        {
+            "completed": completed,
+            "processed_images": processed_images,
+            "skipped_images": skipped_images,
+            "selected_patches": selected_patches,
+            "candidate_parts": row_part_index,
+            "final_worker_count": current_worker_count,
+            "gpu_worker_reductions": worker_reductions,
+            "task_counter": task_counter,
+            "cursor": {
+                "shard_index": shard_index,
+                "next_source_index": next_source_index,
+            },
+        }
+    )
+    write_resume_state(output_dir, state)
+    return state
 
 
 def main() -> None:
@@ -345,6 +437,26 @@ def main() -> None:
     )
 
     files = discover_arrow_files(Path(args.data_dir), split=args.split)
+    resume_signature = build_resume_signature(
+        cfg=cfg,
+        files=files,
+        limit_images=args.limit_images,
+        save_selected_patches=args.save_selected_patches,
+        selected_patch_dir=patch_dir,
+    )
+    state = initialize_resume_state(output_dir, resume_signature)
+    if state.get("completed"):
+        logger.info(
+            "Local selection already completed for %s; nothing to resume.",
+            output_dir,
+        )
+        print(
+            f"Processed {state['processed_images']} images, selected "
+            f"{state['selected_patches']} patches, wrote {state['candidate_parts']} "
+            f"parquet parts using {state['final_worker_count']} worker(s)."
+        )
+        return
+
     logger.info(
         "Starting local selection over %d shard(s) from %s with backend=%s, workers=%d, chunk_size=%d, log_level=%s.",
         len(files),
@@ -355,20 +467,28 @@ def main() -> None:
         args.log_level,
     )
     rows: list[dict] = []
-    row_part_index = 0
-    processed_images = 0
-    skipped_images = 0
-    selected_patches = 0
+    row_part_index = int(state.get("candidate_parts", 0))
+    processed_images = int(state.get("processed_images", 0))
+    skipped_images = int(state.get("skipped_images", 0))
+    selected_patches = int(state.get("selected_patches", 0))
     current_worker_count = max(1, args.num_workers)
-    worker_reductions = 0
-    task_counter = 0
+    worker_reductions = int(state.get("gpu_worker_reductions", 0))
+    task_counter = int(state.get("task_counter", 0))
+    cursor = state.get("cursor", {})
+    start_shard_index = int(cursor.get("shard_index", 0))
+    start_source_index = int(cursor.get("next_source_index", 0))
 
-    for shard_path in files:
+    for shard_index, shard_path in enumerate(files):
+        if shard_index < start_shard_index:
+            continue
         logger.info("Loading shard %s.", shard_path)
         dataset = load_arrow_shard(shard_path)
         progress = tqdm(desc=f"Processing {shard_path.name}", unit="img")
         chunk_tasks: list[dict] = []
+        shard_start_source_index = start_source_index if shard_index == start_shard_index else 0
         for source_index, item in enumerate(dataset):
+            if source_index < shard_start_source_index:
+                continue
             if args.limit_images is not None and processed_images >= args.limit_images:
                 break
 
@@ -382,6 +502,19 @@ def main() -> None:
                 skipped_images += 1
                 processed_images += 1
                 progress.update(1)
+                state = checkpoint_progress(
+                    output_dir,
+                    state,
+                    processed_images=processed_images,
+                    skipped_images=skipped_images,
+                    selected_patches=selected_patches,
+                    row_part_index=row_part_index,
+                    current_worker_count=current_worker_count,
+                    worker_reductions=worker_reductions,
+                    task_counter=task_counter,
+                    shard_index=shard_index,
+                    next_source_index=source_index + 1,
+                )
                 continue
 
             metadata = extract_custom_metadata(item)
@@ -446,7 +579,20 @@ def main() -> None:
                 }
             )
             row_part_index = flush_rows_if_needed(
-                rows, output_dir, row_part_index, args.flush_rows
+                rows, output_dir, row_part_index, flush_rows=1
+            )
+            state = checkpoint_progress(
+                output_dir,
+                state,
+                processed_images=processed_images,
+                skipped_images=skipped_images,
+                selected_patches=selected_patches,
+                row_part_index=row_part_index,
+                current_worker_count=current_worker_count,
+                worker_reductions=worker_reductions,
+                task_counter=task_counter,
+                shard_index=shard_index,
+                next_source_index=source_index + 1,
             )
             chunk_tasks.clear()
 
@@ -476,7 +622,20 @@ def main() -> None:
                 }
             )
             row_part_index = flush_rows_if_needed(
-                rows, output_dir, row_part_index, args.flush_rows
+                rows, output_dir, row_part_index, flush_rows=1
+            )
+            state = checkpoint_progress(
+                output_dir,
+                state,
+                processed_images=processed_images,
+                skipped_images=skipped_images,
+                selected_patches=selected_patches,
+                row_part_index=row_part_index,
+                current_worker_count=current_worker_count,
+                worker_reductions=worker_reductions,
+                task_counter=task_counter,
+                shard_index=shard_index,
+                next_source_index=source_index + 1,
             )
 
         progress.close()
@@ -511,6 +670,20 @@ def main() -> None:
         "config": vars(args),
     }
     write_json(output_dir / "run_summary.json", summary)
+    checkpoint_progress(
+        output_dir,
+        state,
+        processed_images=processed_images,
+        skipped_images=skipped_images,
+        selected_patches=selected_patches,
+        row_part_index=row_part_index,
+        current_worker_count=current_worker_count,
+        worker_reductions=worker_reductions,
+        task_counter=task_counter,
+        shard_index=len(files),
+        next_source_index=0,
+        completed=True,
+    )
     logger.info("Wrote local selection summary to %s.", output_dir / "run_summary.json")
     print(
         f"Processed {processed_images} images, selected {selected_patches} patches, "

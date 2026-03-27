@@ -252,9 +252,14 @@ python -m patchselect global-select ^
   --target_size 10000000 ^
   --bin_columns tissue,is_cancer,state_bin,interface_bin ^
   --bin_alpha 0.5 ^
+  --dataframe_backend auto ^
   --export_tars ^
   --data_dir Data
 ```
+
+`--dataframe_backend auto` uses cuDF when the `cudf` package is installed and otherwise falls back to pandas. You can force CPU behavior with `--dataframe_backend pandas` or require RAPIDS with `--dataframe_backend cudf`.
+
+`global-select` now shows tqdm progress bars for the counting and top-k selection passes when stderr is attached to a terminal. Use `--no_progress` to disable them explicitly.
 
 Tar packing from an existing final-selection manifest:
 
