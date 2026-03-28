@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 RESUME_STATE_PATH = "resume_state.json"
 
 
+def parse_magnification_factors(raw_value: str) -> tuple[float, ...]:
+    factors = tuple(
+        float(token.strip()) for token in raw_value.split(",") if token.strip()
+    )
+    if not factors:
+        raise argparse.ArgumentTypeError(
+            "magnification_factors must contain at least one positive float"
+        )
+    if any(factor <= 0 for factor in factors):
+        raise argparse.ArgumentTypeError(
+            "magnification_factors must contain only positive floats"
+        )
+    return factors
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run local stain-aware patch selection on Arrow shards."
@@ -58,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--patch_stride", type=int, default=256, help="Patch extraction stride"
+    )
+    parser.add_argument(
+        "--magnification_factors",
+        type=parse_magnification_factors,
+        default=(1.0, 0.5, 0.25),
+        help="Comma-separated image-scale factors used for local selection, for example 1.0,0.5,0.25",
     )
     parser.add_argument(
         "--descriptor_backend",
@@ -418,6 +439,7 @@ def main() -> None:
         patch_size=args.patch_size,
         patch_stride=args.patch_stride,
         descriptor_backend=args.descriptor_backend,
+        magnification_factors=args.magnification_factors,
         downsample_size=args.downsample_size,
         slide_stats_size=args.slide_stats_size,
         use_rle_mask=not args.disable_rle_mask,

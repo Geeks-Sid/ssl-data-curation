@@ -9,3 +9,5 @@ logs_cpu_112.txt
 __pycache__/
 output_full/*
 out_full/*
+output_multi_full/*
+patchselect/lightning_logs/*

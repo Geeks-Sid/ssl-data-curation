@@ -80,10 +80,15 @@ def build_chunked_tar_path(base_tar_path: Path, chunk_index: int) -> Path:
 def build_patch_member_name(row: dict, image_format: str) -> str:
     suffix = image_format.lower().lstrip(".")
     sample_slug = slugify(row.get("sample_slug") or row.get("sample_id"), "sample")
+    scale_token = ""
+    scale_level = row.get("scale_level")
+    if scale_level is not None and not pd.isna(scale_level):
+        scale_token = f"__m{int(scale_level):02d}"
     return (
         f"{sample_slug}"
         f"__i{int(row['source_index']):07d}"
         f"__p{int(row['patch_index']):04d}"
+        f"{scale_token}"
         f"__x{int(row['patch_x']):05d}"
         f"__y{int(row['patch_y']):05d}.{suffix}"
     )
@@ -136,6 +141,30 @@ def resolve_patch_size(value: object, default_patch_size: int) -> int:
     if value is None or pd.isna(value):
         return default_patch_size
     return int(value)
+
+
+def resolve_scaled_image_size(
+    row: Any, current_image: Image.Image
+) -> tuple[int, int]:
+    scaled_width = getattr(row, "scaled_image_width", None)
+    scaled_height = getattr(row, "scaled_image_height", None)
+    if (
+        scaled_width is not None
+        and scaled_height is not None
+        and not pd.isna(scaled_width)
+        and not pd.isna(scaled_height)
+    ):
+        return int(scaled_width), int(scaled_height)
+
+    scale_factor = getattr(row, "scale_factor", None)
+    if scale_factor is None or pd.isna(scale_factor):
+        return current_image.width, current_image.height
+
+    factor = float(scale_factor)
+    return (
+        max(1, int(round(current_image.width * factor))),
+        max(1, int(round(current_image.height * factor))),
+    )
 
 
 def partition_final_selection_by_shard(
@@ -244,6 +273,7 @@ def export_partition_assets(
     try:
         current_source_index = None
         current_image = None
+        scaled_image_cache: dict[tuple[int, int], Image.Image] = {}
 
         for row in frame.itertuples(index=False):
             if current_source_index != row.source_index:
@@ -254,23 +284,34 @@ def export_partition_assets(
                     continue
                 current_image = open_rgb_image(bytes_data)
                 current_source_index = int(row.source_index)
+                scaled_image_cache = {}
 
             if current_image is None:
                 advance_progress()
                 continue
+
+            scaled_size = resolve_scaled_image_size(row, current_image)
+            working_image = current_image
+            if scaled_size != (current_image.width, current_image.height):
+                working_image = scaled_image_cache.get(scaled_size)
+                if working_image is None:
+                    working_image = current_image.resize(
+                        scaled_size, Image.Resampling.BILINEAR
+                    )
+                    scaled_image_cache[scaled_size] = working_image
 
             patch_size = resolve_patch_size(
                 getattr(row, "patch_size", None), default_patch_size
             )
             left = int(row.patch_x)
             top = int(row.patch_y)
-            right = min(left + patch_size, current_image.width)
-            bottom = min(top + patch_size, current_image.height)
+            right = min(left + patch_size, working_image.width)
+            bottom = min(top + patch_size, working_image.height)
             if left >= right or top >= bottom:
                 advance_progress()
                 continue
 
-            patch = current_image.crop((left, top, right, bottom))
+            patch = working_image.crop((left, top, right, bottom))
             encoded = encode_patch_image(
                 patch, image_format=image_format, jpeg_quality=jpeg_quality
             )

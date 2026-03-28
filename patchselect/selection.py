@@ -114,16 +114,17 @@ def add_neighborhood_features(records: list[dict]) -> None:
         np.float32
     )
     grid_lookup = {
-        (record["grid_row"], record["grid_col"]): idx
+        (int(record.get("scale_level", 0)), record["grid_row"], record["grid_col"]): idx
         for idx, record in enumerate(records)
     }
     semantic = base[:, SEMANTIC_FEATURE_INDICES]
 
     for idx, record in enumerate(records):
         neighbors = []
+        scale_level = int(record.get("scale_level", 0))
         row, col = record["grid_row"], record["grid_col"]
         for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            neighbor_idx = grid_lookup.get((row + dr, col + dc))
+            neighbor_idx = grid_lookup.get((scale_level, row + dr, col + dc))
             if neighbor_idx is not None:
                 neighbors.append(neighbor_idx)
 

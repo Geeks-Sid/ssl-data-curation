@@ -160,6 +160,7 @@ class LocalSelectionResumeTest(unittest.TestCase):
                     "patch_size": 256,
                     "patch_stride": 256,
                     "descriptor_backend": "cpu",
+                    "magnification_factors": [1.0, 0.5, 0.25],
                     "downsample_size": None,
                     "slide_stats_size": None,
                     "use_rle_mask": True,

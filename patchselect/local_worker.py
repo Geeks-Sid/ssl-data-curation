@@ -14,8 +14,18 @@ from patchselect.pipeline import save_selected_patch, select_patches_from_image
 logger = logging.getLogger(__name__)
 
 
+def jsonable_config_payload(value):
+    if isinstance(value, dict):
+        return {key: jsonable_config_payload(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [jsonable_config_payload(item) for item in value]
+    if isinstance(value, list):
+        return [jsonable_config_payload(item) for item in value]
+    return value
+
+
 def config_to_payload(cfg: PatchSelectionConfig) -> dict:
-    return asdict(cfg)
+    return jsonable_config_payload(asdict(cfg))
 
 
 def config_from_payload(payload: dict) -> PatchSelectionConfig:
