@@ -12,3 +12,7 @@ out_full/*
 output_multi_full/*
 patchselect/lightning_logs/*
 logs_cpu_multi_60.tx6
+runs/*
+ssl_data_curation.egg-info/PKG-INFO
+build/*
+launcher.bat

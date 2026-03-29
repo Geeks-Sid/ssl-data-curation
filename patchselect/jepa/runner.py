@@ -264,6 +264,31 @@ def _representation_metrics(cfg: JEPAConfig, output: ForwardOutput) -> dict[str,
     )
 
 
+def _handle_nonfinite_grad_norm(
+    *,
+    grad_norm: float,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    global_step: int,
+) -> bool:
+    if math.isfinite(grad_norm):
+        return False
+    if scaler.is_enabled():
+        grad_scale = float(scaler.get_scale())
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+        logger.warning(
+            "Skipping optimizer step %d due to non-finite gradients under AMP "
+            "(grad_norm=%s, grad_scale=%s).",
+            global_step + 1,
+            grad_norm,
+            grad_scale,
+        )
+        return True
+    raise RuntimeError(f"Non-finite gradient norm at step {global_step + 1}: {grad_norm}")
+
+
 def train(
     cfg: JEPAConfig,
     resolved_config: dict[str, Any],
@@ -457,8 +482,13 @@ def train(
             grad_norm = float(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.runtime.grad_clip_norm)
             )
-            if not math.isfinite(grad_norm):
-                raise RuntimeError(f"Non-finite gradient norm at step {global_step + 1}: {grad_norm}")
+            if _handle_nonfinite_grad_norm(
+                grad_norm=grad_norm,
+                optimizer=optimizer,
+                scaler=scaler,
+                global_step=global_step,
+            ):
+                continue
 
             scaler.step(optimizer)
             scaler.update()

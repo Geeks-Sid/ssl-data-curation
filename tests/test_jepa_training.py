@@ -18,7 +18,7 @@ from patchselect.jepa import checkpointing
 from patchselect.jepa.cli import main as jepa_main
 from patchselect.jepa.config import load_config
 from patchselect.jepa.model import TimmPathologySpatialJEPA, compute_losses
-from patchselect.jepa.runner import build_run_paths
+from patchselect.jepa.runner import _handle_nonfinite_grad_norm, build_run_paths
 
 
 class DummyPatchEmbed(torch.nn.Module):
@@ -87,6 +87,26 @@ class DummyWandbModule(types.ModuleType):
 
     def Artifact(self, name, type):
         return DummyArtifact(name, type)
+
+
+class DummyGradScaler:
+    def __init__(self, *, enabled: bool, scale: float = 65536.0) -> None:
+        self._enabled = enabled
+        self._scale = scale
+        self.step_calls = 0
+        self.update_calls = 0
+
+    def is_enabled(self) -> bool:
+        return self._enabled
+
+    def get_scale(self) -> float:
+        return self._scale
+
+    def step(self, optimizer) -> None:
+        self.step_calls += 1
+
+    def update(self) -> None:
+        self.update_calls += 1
 
 
 class JepaTrainingTest(unittest.TestCase):
@@ -335,6 +355,37 @@ class JepaTrainingTest(unittest.TestCase):
         self.assertIn("train/gaussian_sketch", metrics)
         self.assertGreaterEqual(output.mask_metadata["num_targets_used"], 1)
         self.assertGreater(output.mask_metadata["target_token_count"], 0)
+
+    def test_nonfinite_grad_norm_is_skipped_when_amp_scaler_is_enabled(self) -> None:
+        parameter = torch.nn.Parameter(torch.tensor([1.0]))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        parameter.grad = torch.full_like(parameter, float("inf"))
+        scaler = DummyGradScaler(enabled=True)
+
+        should_skip = _handle_nonfinite_grad_norm(
+            grad_norm=float("nan"),
+            optimizer=optimizer,
+            scaler=scaler,
+            global_step=1,
+        )
+
+        self.assertTrue(should_skip)
+        self.assertEqual(scaler.step_calls, 1)
+        self.assertEqual(scaler.update_calls, 1)
+        self.assertIsNone(parameter.grad)
+
+    def test_nonfinite_grad_norm_raises_without_amp_scaler(self) -> None:
+        parameter = torch.nn.Parameter(torch.tensor([1.0]))
+        optimizer = torch.optim.SGD([parameter], lr=0.1)
+        scaler = DummyGradScaler(enabled=False)
+
+        with self.assertRaisesRegex(RuntimeError, "Non-finite gradient norm at step 2: nan"):
+            _handle_nonfinite_grad_norm(
+                grad_norm=float("nan"),
+                optimizer=optimizer,
+                scaler=scaler,
+                global_step=1,
+            )
 
     def test_ijepa_uses_ema_target_and_supports_resume(self) -> None:
         config_path = self._write_config(

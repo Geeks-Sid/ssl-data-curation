@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -9,8 +10,35 @@ from typing import Any, Iterable
 from omegaconf import OmegaConf
 
 
+def _find_repo_root() -> Path | None:
+    env_root = os.environ.get("PATCHSELECT_REPO_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+
+    cwd = Path.cwd().resolve()
+    candidates.extend([cwd, *cwd.parents])
+
+    module_root = Path(__file__).resolve().parents[2]
+    candidates.extend([module_root, *module_root.parents])
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if (candidate / "configs" / "jepa" / "base.yaml").exists():
+            return candidate
+    return None
+
+
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    repo_root = _find_repo_root()
+    if repo_root is None:
+        raise FileNotFoundError(
+            "Unable to locate the JEPA repo root. Set PATCHSELECT_REPO_ROOT or run from the repository root."
+        )
+    return repo_root
 
 
 def _default_config_path() -> Path:
