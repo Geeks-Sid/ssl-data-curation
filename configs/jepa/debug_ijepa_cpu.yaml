@@ -1,0 +1,36 @@
+runtime:
+  experiment_name: debug_ijepa
+  run_name: cpu-smoke
+  max_steps: 4
+  batch_size: 2
+  device: cpu
+  precision: 32
+
+logging:
+  log_every_steps: 1
+  avg_window: 4
+
+checkpoint:
+  save_every_steps: 2
+  keep_last_k: 2
+
+wandb:
+  mode: disabled
+
+model:
+  family: ijepa
+  pred_depth: 2
+  pred_num_heads: 4
+
+target_encoder:
+  kind: ema
+  ema_momentum: 0.99
+
+projector:
+  kind: mlp_ln
+  hidden_dim: 256
+  out_dim: 128
+
+regularizer:
+  name: none
+  weight: 0.0

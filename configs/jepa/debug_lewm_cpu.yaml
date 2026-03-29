@@ -1,0 +1,33 @@
+runtime:
+  experiment_name: debug_lewm
+  run_name: cpu-smoke
+  max_steps: 4
+  batch_size: 2
+  device: cpu
+  precision: 32
+
+logging:
+  log_every_steps: 1
+  avg_window: 4
+
+checkpoint:
+  save_every_steps: 2
+  keep_last_k: 2
+
+wandb:
+  mode: disabled
+
+model:
+  family: lewm
+  pred_depth: 2
+  pred_num_heads: 4
+
+projector:
+  kind: mlp_ln
+  hidden_dim: 256
+  out_dim: 128
+
+regularizer:
+  name: gaussian_sketch
+  weight: 0.1
+  num_projections: 32

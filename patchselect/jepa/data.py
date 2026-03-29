@@ -52,17 +52,65 @@ class TarSource:
     cleanup_after: bool = False
 
 
+_AUGMENT_PROFILE_DEFAULTS: dict[str, dict[str, float | tuple[float, float]]] = {
+    "pathology_light": {
+        "crop_scale": (0.8, 1.0),
+        "horizontal_flip_prob": 0.5,
+        "vertical_flip_prob": 0.0,
+        "brightness": 0.04,
+        "contrast": 0.04,
+        "saturation": 0.04,
+        "hue": 0.01,
+    },
+    "pathology_medium": {
+        "crop_scale": (0.65, 1.0),
+        "horizontal_flip_prob": 0.5,
+        "vertical_flip_prob": 0.25,
+        "brightness": 0.08,
+        "contrast": 0.08,
+        "saturation": 0.08,
+        "hue": 0.02,
+    },
+    "legacy_ssl": {
+        "crop_scale": (0.5, 1.0),
+        "horizontal_flip_prob": 0.5,
+        "vertical_flip_prob": 0.5,
+        "brightness": 0.1,
+        "contrast": 0.1,
+        "saturation": 0.1,
+        "hue": 0.05,
+    },
+}
+
+
+def _resolve_augment_param(
+    cfg: AugmentConfig,
+    key: str,
+) -> float | tuple[float, float]:
+    value = getattr(cfg, key)
+    if value is not None:
+        return value
+    return _AUGMENT_PROFILE_DEFAULTS[cfg.profile][key]
+
+
 def build_train_transform(cfg: AugmentConfig) -> T.Compose:
+    crop_scale = _resolve_augment_param(cfg, "crop_scale")
+    horizontal_flip_prob = _resolve_augment_param(cfg, "horizontal_flip_prob")
+    vertical_flip_prob = _resolve_augment_param(cfg, "vertical_flip_prob")
+    brightness = _resolve_augment_param(cfg, "brightness")
+    contrast = _resolve_augment_param(cfg, "contrast")
+    saturation = _resolve_augment_param(cfg, "saturation")
+    hue = _resolve_augment_param(cfg, "hue")
     return T.Compose(
         [
-            T.RandomResizedCrop(cfg.image_size, scale=cfg.crop_scale),
-            T.RandomHorizontalFlip(p=cfg.horizontal_flip_prob),
-            T.RandomVerticalFlip(p=cfg.vertical_flip_prob),
+            T.RandomResizedCrop(cfg.image_size, scale=crop_scale),
+            T.RandomHorizontalFlip(p=horizontal_flip_prob),
+            T.RandomVerticalFlip(p=vertical_flip_prob),
             T.ColorJitter(
-                brightness=cfg.brightness,
-                contrast=cfg.contrast,
-                saturation=cfg.saturation,
-                hue=cfg.hue,
+                brightness=brightness,
+                contrast=contrast,
+                saturation=saturation,
+                hue=hue,
             ),
             T.ToTensor(),
             T.Normalize(mean=list(cfg.normalize_mean), std=list(cfg.normalize_std)),

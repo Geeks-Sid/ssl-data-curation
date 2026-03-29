@@ -1,0 +1,2 @@
+masking:
+  strategy: random_tokens

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from omegaconf import OmegaConf
 
@@ -17,8 +17,19 @@ def _default_config_path() -> Path:
     return _repo_root() / "configs" / "jepa" / "base.yaml"
 
 
-def _normalize_str_seq(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+def _normalize_str_seq(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(str(value) for value in values)
+
+
+def _normalize_optional_pair(
+    values: Iterable[float] | None,
+) -> tuple[float, float] | None:
+    if values is None:
+        return None
+    items = tuple(float(value) for value in values)
+    if len(items) != 2:
+        raise ValueError("Expected exactly two numeric values")
+    return items
 
 
 @dataclass(slots=True)
@@ -46,45 +57,132 @@ class DataConfig:
 
 @dataclass(slots=True)
 class AugmentConfig:
+    profile: str = "pathology_light"
     image_size: int = 224
-    crop_scale: tuple[float, float] = (0.5, 1.0)
-    horizontal_flip_prob: float = 0.5
-    vertical_flip_prob: float = 0.5
-    brightness: float = 0.1
-    contrast: float = 0.1
-    saturation: float = 0.1
-    hue: float = 0.05
+    crop_scale: tuple[float, float] | None = None
+    horizontal_flip_prob: float | None = None
+    vertical_flip_prob: float | None = None
+    brightness: float | None = None
+    contrast: float | None = None
+    saturation: float | None = None
+    hue: float | None = None
     normalize_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
     normalize_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
 
     def __post_init__(self) -> None:
+        self.crop_scale = _normalize_optional_pair(self.crop_scale)
         if self.image_size <= 0:
             raise ValueError("augment.image_size must be positive")
-        if len(self.crop_scale) != 2:
-            raise ValueError("augment.crop_scale must contain exactly two floats")
+        if self.profile not in {"pathology_light", "pathology_medium", "legacy_ssl"}:
+            raise ValueError(
+                "augment.profile must be one of: pathology_light, pathology_medium, legacy_ssl"
+            )
 
 
 @dataclass(slots=True)
 class ModelConfig:
+    family: str = "lewm"
     model_name: str = "vit_small_patch16_224"
     pred_depth: int = 6
     pred_num_heads: int = 6
-    proj_hidden_dim: int = 2048
-    proj_out_dim: int = 1024
-    mask_ratio: float = 0.6
     pretrained: bool = False
 
     def __post_init__(self) -> None:
+        if self.family not in {"lewm", "ijepa"}:
+            raise ValueError("model.family must be one of: lewm, ijepa")
+        if self.pred_depth <= 0:
+            raise ValueError("model.pred_depth must be positive")
+
+
+@dataclass(slots=True)
+class MaskingConfig:
+    strategy: str = "block_targets"
+    mask_ratio: float = 0.6
+    num_targets: int = 4
+    target_scale_range: tuple[float, float] = (0.15, 0.2)
+    aspect_ratio_range: tuple[float, float] = (0.75, 1.5)
+    context_min_keep: int = 32
+    allow_overlap: bool = False
+
+    def __post_init__(self) -> None:
+        self.target_scale_range = _normalize_optional_pair(self.target_scale_range) or (
+            0.15,
+            0.2,
+        )
+        self.aspect_ratio_range = _normalize_optional_pair(self.aspect_ratio_range) or (
+            0.75,
+            1.5,
+        )
+        if self.strategy not in {"random_tokens", "block_targets"}:
+            raise ValueError(
+                "masking.strategy must be one of: random_tokens, block_targets"
+            )
         if not 0 < self.mask_ratio < 1:
-            raise ValueError("model.mask_ratio must be between 0 and 1")
+            raise ValueError("masking.mask_ratio must be between 0 and 1")
+        if self.num_targets < 1:
+            raise ValueError("masking.num_targets must be >= 1")
+        if self.context_min_keep < 1:
+            raise ValueError("masking.context_min_keep must be >= 1")
+
+
+@dataclass(slots=True)
+class TargetEncoderConfig:
+    kind: str = "shared"
+    ema_momentum: float = 0.996
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"shared", "ema"}:
+            raise ValueError("target_encoder.kind must be one of: shared, ema")
+        if not 0 < self.ema_momentum < 1:
+            raise ValueError("target_encoder.ema_momentum must be between 0 and 1")
+
+
+@dataclass(slots=True)
+class ProjectorConfig:
+    kind: str = "mlp_ln"
+    hidden_dim: int = 2048
+    out_dim: int = 1024
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"heavy_bn", "mlp_ln", "linear"}:
+            raise ValueError("projector.kind must be one of: heavy_bn, mlp_ln, linear")
+        if self.out_dim <= 0:
+            raise ValueError("projector.out_dim must be positive")
+        if self.kind != "linear" and self.hidden_dim <= 0:
+            raise ValueError("projector.hidden_dim must be positive")
 
 
 @dataclass(slots=True)
 class LossConfig:
-    lambda_sigreg: float = 0.1
-    sigreg_num_projections: int = 1024
-    sigreg_gamma: float = 1.0
+    prediction: str = "mse"
     collapse_threshold: float = 1e-3
+
+    def __post_init__(self) -> None:
+        if self.prediction != "mse":
+            raise ValueError("loss.prediction currently supports only: mse")
+
+
+@dataclass(slots=True)
+class RegularizerConfig:
+    name: str = "gaussian_sketch"
+    weight: float = 0.1
+    num_projections: int = 256
+    gamma: float = 1.0
+    eps: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if self.name not in {"none", "sigreg", "gaussian_sketch"}:
+            raise ValueError(
+                "regularizer.name must be one of: none, sigreg, gaussian_sketch"
+            )
+        if self.weight < 0:
+            raise ValueError("regularizer.weight must be >= 0")
+        if self.num_projections < 1:
+            raise ValueError("regularizer.num_projections must be >= 1")
+        if self.gamma <= 0:
+            raise ValueError("regularizer.gamma must be > 0")
+        if self.eps <= 0:
+            raise ValueError("regularizer.eps must be > 0")
 
 
 @dataclass(slots=True)
@@ -178,7 +276,11 @@ class JEPAConfig:
     data: DataConfig = field(default_factory=DataConfig)
     augment: AugmentConfig = field(default_factory=AugmentConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    masking: MaskingConfig = field(default_factory=MaskingConfig)
+    target_encoder: TargetEncoderConfig = field(default_factory=TargetEncoderConfig)
+    projector: ProjectorConfig = field(default_factory=ProjectorConfig)
     loss: LossConfig = field(default_factory=LossConfig)
+    regularizer: RegularizerConfig = field(default_factory=RegularizerConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -191,14 +293,41 @@ def _section(section_type: type[Any], payload: dict[str, Any]) -> Any:
     return section_type(**payload)
 
 
+def validate_config(cfg: JEPAConfig) -> None:
+    if cfg.model.family == "ijepa" and cfg.target_encoder.kind != "ema":
+        raise ValueError("ijepa requires target_encoder.kind=ema")
+    if cfg.model.family == "lewm" and cfg.target_encoder.kind != "shared":
+        raise ValueError("lewm requires target_encoder.kind=shared")
+    if cfg.masking.strategy == "block_targets":
+        low, high = cfg.masking.target_scale_range
+        if not 0 < low <= high < 1:
+            raise ValueError(
+                "masking.target_scale_range must satisfy 0 < low <= high < 1"
+            )
+        ar_low, ar_high = cfg.masking.aspect_ratio_range
+        if ar_low <= 0 or ar_high <= 0 or ar_low > ar_high:
+            raise ValueError(
+                "masking.aspect_ratio_range must satisfy 0 < low <= high"
+            )
+    if cfg.regularizer.name == "gaussian_sketch" and cfg.regularizer.num_projections < 1:
+        raise ValueError(
+            "gaussian_sketch requires regularizer.num_projections >= 1"
+        )
+
+
 def load_config(
-    config_file: str | None = None,
+    config_file: str | list[str] | tuple[str, ...] | None = None,
     cli_overrides: list[str] | None = None,
 ) -> tuple[JEPAConfig, dict[str, Any], Any]:
     base_cfg = OmegaConf.load(_default_config_path())
     cfg = base_cfg
-    if config_file:
-        cfg = OmegaConf.merge(cfg, OmegaConf.load(Path(config_file)))
+    config_files: list[str] = []
+    if isinstance(config_file, str):
+        config_files = [config_file]
+    elif config_file is not None:
+        config_files = [str(path) for path in config_file]
+    for path in config_files:
+        cfg = OmegaConf.merge(cfg, OmegaConf.load(Path(path)))
     if cli_overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_cli(cli_overrides))
     resolved = OmegaConf.to_container(cfg, resolve=True)
@@ -206,7 +335,13 @@ def load_config(
         data=_section(DataConfig, resolved.get("data", {})),
         augment=_section(AugmentConfig, resolved.get("augment", {})),
         model=_section(ModelConfig, resolved.get("model", {})),
+        masking=_section(MaskingConfig, resolved.get("masking", {})),
+        target_encoder=_section(
+            TargetEncoderConfig, resolved.get("target_encoder", {})
+        ),
+        projector=_section(ProjectorConfig, resolved.get("projector", {})),
         loss=_section(LossConfig, resolved.get("loss", {})),
+        regularizer=_section(RegularizerConfig, resolved.get("regularizer", {})),
         optimizer=_section(OptimizerConfig, resolved.get("optimizer", {})),
         scheduler=_section(SchedulerConfig, resolved.get("scheduler", {})),
         runtime=_section(RuntimeConfig, resolved.get("runtime", {})),
@@ -214,6 +349,7 @@ def load_config(
         checkpoint=_section(CheckpointConfig, resolved.get("checkpoint", {})),
         wandb=_section(WandbConfig, resolved.get("wandb", {})),
     )
+    validate_config(typed)
     return typed, resolved, cfg
 
 

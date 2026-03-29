@@ -2,13 +2,19 @@ data:
   cache_in_ram: true
 
 model:
+  family: lewm
   model_name: vit_small_patch16_224
   pred_depth: 2
-  proj_hidden_dim: 256
-  proj_out_dim: 128
+  pred_num_heads: 4
 
-loss:
-  sigreg_num_projections: 64
+projector:
+  kind: mlp_ln
+  hidden_dim: 256
+  out_dim: 128
+
+regularizer:
+  name: gaussian_sketch
+  num_projections: 64
 
 runtime:
   experiment_name: debug

@@ -1,0 +1,5 @@
+regularizer:
+  name: sigreg
+  weight: 0.1
+  num_projections: 256
+  gamma: 1.0

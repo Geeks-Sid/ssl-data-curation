@@ -72,18 +72,54 @@ class JsonlMetricWriter:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _projection_moment_stats(
+    embeddings: torch.Tensor,
+    *,
+    num_projections: int,
+    eps: float = 1e-6,
+) -> dict[str, float]:
+    dim = embeddings.shape[-1]
+    directions = torch.randn(dim, num_projections, device=embeddings.device)
+    directions = F.normalize(directions, p=2, dim=0)
+    projected = embeddings @ directions
+    mean = projected.mean(dim=0)
+    centered = projected - mean
+    var = centered.pow(2).mean(dim=0).clamp_min(eps)
+    standardized = centered / var.sqrt()
+    skew = standardized.pow(3).mean(dim=0)
+    kurtosis = standardized.pow(4).mean(dim=0) - 3.0
+    proxy = (
+        mean.abs().mean()
+        + (var - 1.0).abs().mean()
+        + skew.abs().mean()
+        + kurtosis.abs().mean()
+    )
+    return {
+        "projection_mean_abs": mean.abs().mean().item(),
+        "projection_std_mean": var.sqrt().mean().item(),
+        "projection_skew_abs": skew.abs().mean().item(),
+        "projection_kurtosis_abs": kurtosis.abs().mean().item(),
+        "projection_normality_proxy": proxy.item(),
+    }
+
+
 def compute_representation_metrics(
     z_pred: torch.Tensor,
     z_tgt: torch.Tensor,
     *,
+    regularizer_embeddings: torch.Tensor,
     collapse_threshold: float,
+    projection_count: int = 32,
 ) -> dict[str, float]:
     pred_flat = z_pred.reshape(-1, z_pred.shape[-1])
     tgt_flat = z_tgt.reshape(-1, z_tgt.shape[-1])
+    reg_flat = regularizer_embeddings.reshape(-1, regularizer_embeddings.shape[-1])
+
     pred_norm = pred_flat.norm(dim=-1).mean().item()
     target_norm = tgt_flat.norm(dim=-1).mean().item()
     pred_std = pred_flat.std(dim=0)
     target_std = tgt_flat.std(dim=0)
+    reg_var = reg_flat.var(dim=0, unbiased=False)
     collapse_frac = (
         ((pred_std < collapse_threshold) | (target_std < collapse_threshold))
         .float()
@@ -91,6 +127,20 @@ def compute_representation_metrics(
         .item()
     )
     pred_target_cosine = F.cosine_similarity(pred_flat, tgt_flat, dim=-1).mean().item()
+
+    centered = reg_flat - reg_flat.mean(dim=0, keepdim=True)
+    if centered.shape[0] > 1:
+        covariance = centered.T @ centered / float(centered.shape[0] - 1)
+        offdiag = covariance - torch.diag(torch.diag(covariance))
+        covariance_offdiag_energy = offdiag.pow(2).mean().item()
+    else:
+        covariance_offdiag_energy = 0.0
+    isotropy_score = (reg_var.min() / reg_var.mean().clamp_min(1e-6)).item()
+    projection_stats = _projection_moment_stats(
+        reg_flat,
+        num_projections=max(4, int(projection_count)),
+    )
+
     return {
         "model/pred_target_cosine": pred_target_cosine,
         "model/pred_norm": pred_norm,
@@ -98,6 +148,18 @@ def compute_representation_metrics(
         "model/pred_std_mean": pred_std.mean().item(),
         "model/target_std_mean": target_std.mean().item(),
         "model/collapse_frac": collapse_frac,
+        "model/variance_floor": reg_var.min().item(),
+        "model/covariance_offdiag_energy": covariance_offdiag_energy,
+        "model/isotropy_score": isotropy_score,
+        "model/projection_mean_abs": projection_stats["projection_mean_abs"],
+        "model/projection_std_mean": projection_stats["projection_std_mean"],
+        "model/projection_skew_abs": projection_stats["projection_skew_abs"],
+        "model/projection_kurtosis_abs": projection_stats[
+            "projection_kurtosis_abs"
+        ],
+        "model/projection_normality_proxy": projection_stats[
+            "projection_normality_proxy"
+        ],
     }
 
 

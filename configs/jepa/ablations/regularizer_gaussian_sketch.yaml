@@ -1,0 +1,4 @@
+regularizer:
+  name: gaussian_sketch
+  weight: 0.1
+  num_projections: 256

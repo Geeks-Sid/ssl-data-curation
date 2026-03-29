@@ -1,0 +1,22 @@
+model:
+  family: ijepa
+
+target_encoder:
+  kind: ema
+  ema_momentum: 0.996
+
+masking:
+  strategy: block_targets
+
+projector:
+  kind: mlp_ln
+
+regularizer:
+  name: none
+  weight: 0.0
+
+augment:
+  profile: pathology_medium
+
+runtime:
+  experiment_name: ijepa_default

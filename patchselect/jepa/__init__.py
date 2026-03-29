@@ -1,5 +1,10 @@
 """JEPA training package."""
 
-from patchselect.jepa.cli import main
+
+def main() -> None:
+    from patchselect.jepa.cli import main as cli_main
+
+    cli_main()
+
 
 __all__ = ["main"]

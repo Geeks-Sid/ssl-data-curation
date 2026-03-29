@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from patchselect.jepa import checkpointing
 from patchselect.jepa.cli import main as jepa_main
 from patchselect.jepa.config import load_config
+from patchselect.jepa.model import TimmPathologySpatialJEPA, compute_losses
 from patchselect.jepa.runner import build_run_paths
 
 
@@ -24,6 +25,7 @@ class DummyPatchEmbed(torch.nn.Module):
     def __init__(self, embed_dim: int = 32) -> None:
         super().__init__()
         self.proj = torch.nn.Conv2d(3, embed_dim, kernel_size=16, stride=16)
+        self.grid_size = (14, 14)
         self.num_patches = 14 * 14
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -151,12 +153,19 @@ class JepaTrainingTest(unittest.TestCase):
                 "log_checkpoints": True,
             },
             "model": {
-                "proj_hidden_dim": 64,
-                "proj_out_dim": 32,
+                "family": "lewm",
                 "pred_depth": 2,
+                "pred_num_heads": 4,
             },
-            "loss": {
-                "sigreg_num_projections": 32,
+            "projector": {
+                "kind": "mlp_ln",
+                "hidden_dim": 64,
+                "out_dim": 32,
+            },
+            "regularizer": {
+                "name": "gaussian_sketch",
+                "weight": 0.1,
+                "num_projections": 32,
             },
         }
         merged = OmegaConf.merge(cfg, extra)
@@ -164,7 +173,11 @@ class JepaTrainingTest(unittest.TestCase):
         OmegaConf.save(config=OmegaConf.create(merged), f=str(path))
         return path
 
-    def _run_main(self, config_path: Path, dummy_wandb: DummyWandbModule) -> None:
+    def _run_main(self, config_path: Path | list[Path], dummy_wandb: DummyWandbModule) -> None:
+        config_paths = [config_path] if isinstance(config_path, Path) else config_path
+        argv = ["train_jepa.py"]
+        for path in config_paths:
+            argv.extend(["--config_file", str(path)])
         with mock.patch(
             "timm.create_model",
             side_effect=lambda *args, **kwargs: DummyEncoder(embed_dim=32),
@@ -173,7 +186,7 @@ class JepaTrainingTest(unittest.TestCase):
             {"wandb": dummy_wandb},
         ), mock.patch(
             "sys.argv",
-            ["train_jepa.py", "--config_file", str(config_path)],
+            argv,
         ):
             jepa_main()
 
@@ -198,6 +211,7 @@ class JepaTrainingTest(unittest.TestCase):
         run_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "model": {"weight": torch.tensor([1.0])},
+            "model_training_state": {"mask_sampler_step": 3, "last_mask_metadata": {}},
             "optimizer": {"state": {}, "param_groups": []},
             "scheduler": {"last_epoch": 3},
             "scaler": {},
@@ -214,6 +228,7 @@ class JepaTrainingTest(unittest.TestCase):
             "data_cursor": {"tar_index": 1, "member_index": 4},
             "meter_state": {"window": 3, "meters": {}},
             "wandb_run_id": "resume-me",
+            "family": "lewm",
         }
         step_path, latest_path = checkpointing.save_checkpoint_bundle(
             checkpoint_dir=run_dir / "checkpoints",
@@ -283,10 +298,83 @@ class JepaTrainingTest(unittest.TestCase):
         self.assertGreaterEqual(state["health"]["corrupt_images"], 1)
         self.assertEqual(state["status"], "completed")
 
+    def test_invalid_family_target_encoder_combination_rejected(self) -> None:
+        config_path = self._write_config(
+            "invalid_family.yaml",
+            {
+                "model": {"family": "ijepa"},
+                "target_encoder": {"kind": "shared"},
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "ijepa requires target_encoder.kind=ema"):
+            load_config(str(config_path), [])
+
+    def test_block_mask_metadata_and_gaussian_regularizer_are_finite(self) -> None:
+        config_path = self._write_config(
+            "mask_block.yaml",
+            {
+                "masking": {
+                    "strategy": "block_targets",
+                    "num_targets": 2,
+                    "target_scale_range": [0.1, 0.15],
+                    "aspect_ratio_range": [0.8, 1.2],
+                    "context_min_keep": 16,
+                },
+            },
+        )
+        cfg, _, _ = load_config(str(config_path), [])
+        with mock.patch(
+            "timm.create_model",
+            side_effect=lambda *args, **kwargs: DummyEncoder(embed_dim=32),
+        ):
+            model = TimmPathologySpatialJEPA(cfg, mask_seed=123)
+            images = torch.randn(2, 3, 224, 224)
+            output = model(images)
+            loss, metrics = compute_losses(output, cfg.loss, cfg.regularizer)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertIn("train/gaussian_sketch", metrics)
+        self.assertGreaterEqual(output.mask_metadata["num_targets_used"], 1)
+        self.assertGreater(output.mask_metadata["target_token_count"], 0)
+
+    def test_ijepa_uses_ema_target_and_supports_resume(self) -> None:
+        config_path = self._write_config(
+            "ijepa.yaml",
+            {
+                "model": {"family": "ijepa"},
+                "target_encoder": {"kind": "ema", "ema_momentum": 0.99},
+                "regularizer": {"name": "none", "weight": 0.0},
+            },
+        )
+        dummy_wandb = DummyWandbModule()
+        self._run_main(config_path, dummy_wandb)
+
+        run_dir = self.output_root / "tests" / "ijepa"
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["family"], "ijepa")
+        self.assertEqual(state["target_encoder_kind"], "ema")
+        checkpoint = checkpointing.load_checkpoint(run_dir / "checkpoints" / "latest.pt", device="cpu")
+        self.assertIn("model_training_state", checkpoint)
+        self.assertEqual(checkpoint["family"], "ijepa")
+
+        resume_cfg = self._write_config(
+            "ijepa_resume.yaml",
+            {
+                "runtime": {"run_name": "ijepa"},
+                "model": {"family": "ijepa"},
+                "target_encoder": {"kind": "ema", "ema_momentum": 0.99},
+                "regularizer": {"name": "none", "weight": 0.0},
+                "checkpoint": {"resume": "auto"},
+            },
+        )
+        self._run_main(resume_cfg, dummy_wandb)
+        resumed_state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(resumed_state["wandb_run_id"], state["wandb_run_id"])
+
     def test_checkpoint_retention_keeps_latest_and_recent_steps(self) -> None:
         checkpoint_dir = self.temp_dir / "ckpts"
         payload = {
             "model": {},
+            "model_training_state": {"mask_sampler_step": 0, "last_mask_metadata": {}},
             "optimizer": {"state": {}, "param_groups": []},
             "scheduler": None,
             "scaler": {},
@@ -303,6 +391,7 @@ class JepaTrainingTest(unittest.TestCase):
             "data_cursor": {"tar_index": 0, "member_index": 0},
             "meter_state": {"window": 3, "meters": {}},
             "wandb_run_id": None,
+            "family": "lewm",
         }
         for step in range(1, 6):
             payload["global_step"] = step

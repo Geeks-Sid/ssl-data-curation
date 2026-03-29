@@ -1,0 +1,21 @@
+model:
+  family: lewm
+
+target_encoder:
+  kind: shared
+
+masking:
+  strategy: block_targets
+
+projector:
+  kind: mlp_ln
+
+regularizer:
+  name: gaussian_sketch
+  weight: 0.1
+
+augment:
+  profile: pathology_light
+
+runtime:
+  experiment_name: lewm_default

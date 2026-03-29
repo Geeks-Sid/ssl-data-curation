@@ -40,7 +40,7 @@ from patchselect.jepa.metrics import (
     compute_representation_metrics,
     parameter_l2_norm,
 )
-from patchselect.jepa.model import TimmPathologySpatialJEPA, compute_losses
+from patchselect.jepa.model import ForwardOutput, TimmPathologySpatialJEPA, compute_losses
 from patchselect.jepa.tracking import build_tracker
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,17 @@ def _restore_rng_state(state: dict[str, Any]) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
+def _run_metadata(cfg: JEPAConfig) -> dict[str, str]:
+    return {
+        "family": cfg.model.family,
+        "masking_strategy": cfg.masking.strategy,
+        "regularizer_name": cfg.regularizer.name,
+        "target_encoder_kind": cfg.target_encoder.kind,
+        "projector_kind": cfg.projector.kind,
+        "augment_profile": cfg.augment.profile,
+    }
+
+
 def _state_payload(
     *,
     status: str,
@@ -172,6 +183,7 @@ def _state_payload(
     health: dict[str, Any],
     last_checkpoint: str | None,
     resume_source: str | None,
+    metadata: dict[str, str],
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -188,12 +200,13 @@ def _state_payload(
         "health": health,
         "last_checkpoint": last_checkpoint,
         "resume_source": resume_source,
+        **metadata,
     }
 
 
 def _checkpoint_payload(
     *,
-    model: torch.nn.Module,
+    model: TimmPathologySpatialJEPA,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler | None,
     scaler: torch.cuda.amp.GradScaler,
@@ -205,9 +218,11 @@ def _checkpoint_payload(
     data_cursor: dict[str, int],
     meter_state: dict[str, Any],
     run_id: str | None,
+    metadata: dict[str, str],
 ) -> dict[str, Any]:
     return {
         "model": model.state_dict(),
+        "model_training_state": model.get_training_state(),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "scaler": scaler.state_dict(),
@@ -220,7 +235,33 @@ def _checkpoint_payload(
         "data_cursor": data_cursor,
         "meter_state": meter_state,
         "wandb_run_id": run_id,
+        **metadata,
     }
+
+
+def _averaged_metric_inputs(log_payload: dict[str, float]) -> dict[str, float]:
+    keys = (
+        "train/loss",
+        "train/mse",
+        "train/regularizer",
+        "train/sigreg",
+        "train/gaussian_sketch",
+    )
+    return {key: log_payload[key] for key in keys if key in log_payload}
+
+
+def _mask_metrics(mask_metadata: dict[str, float | int]) -> dict[str, float]:
+    return {f"mask/{key}": float(value) for key, value in mask_metadata.items()}
+
+
+def _representation_metrics(cfg: JEPAConfig, output: ForwardOutput) -> dict[str, float]:
+    return compute_representation_metrics(
+        output.z_pred.detach(),
+        output.z_tgt.detach(),
+        regularizer_embeddings=output.regularizer_embeddings.detach(),
+        collapse_threshold=cfg.loss.collapse_threshold,
+        projection_count=min(cfg.regularizer.num_projections, 64),
+    )
 
 
 def train(
@@ -238,9 +279,10 @@ def train(
     manifest = discover_tar_manifest(cfg.data)
     signature = compute_resume_signature(resolved_config, manifest_metadata(manifest))
     cfg_hash = config_hash(resolved_config)
+    metadata = _run_metadata(cfg)
 
     transform = build_train_transform(cfg.augment)
-    model = TimmPathologySpatialJEPA(cfg.model).to(device)
+    model = TimmPathologySpatialJEPA(cfg, mask_seed=cfg.runtime.seed).to(device)
     optimizer = build_optimizer(cfg, model)
     scheduler = build_scheduler(cfg, optimizer)
     scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled(cfg.runtime.precision, device))
@@ -266,6 +308,7 @@ def train(
                 "Resume checkpoint signature does not match the current JEPA config/data manifest."
             )
         model.load_state_dict(checkpoint["model"])
+        model.load_training_state(checkpoint.get("model_training_state"))
         optimizer.load_state_dict(checkpoint["optimizer"])
         if scheduler is not None and checkpoint["scheduler"] is not None:
             scheduler.load_state_dict(checkpoint["scheduler"])
@@ -317,7 +360,8 @@ def train(
     model.train()
 
     logger.info(
-        "Starting JEPA training model=%s device=%s steps=%d batch_size=%d resume=%s",
+        "Starting JEPA training family=%s model=%s device=%s steps=%d batch_size=%d resume=%s",
+        cfg.model.family,
         cfg.model.model_name,
         device,
         cfg.runtime.max_steps,
@@ -325,11 +369,12 @@ def train(
         resume_source or "none",
     )
     logger.info(
-        "Run metadata: host=%s git_sha=%s manifest_tars=%d config_hash=%s",
+        "Run metadata: host=%s git_sha=%s manifest_tars=%d config_hash=%s metadata=%s",
         host_name(),
         git_sha or "unknown",
         len(manifest),
         cfg_hash,
+        json.dumps(metadata, sort_keys=True),
     )
 
     latest_state = _state_payload(
@@ -346,6 +391,7 @@ def train(
         health=dataset.health.to_dict(),
         last_checkpoint=resume_source,
         resume_source=resume_source,
+        metadata=metadata,
     )
     write_state_file(paths.run_dir, latest_state)
 
@@ -355,13 +401,12 @@ def train(
     try:
         while global_step < cfg.runtime.max_steps:
             optimizer.zero_grad(set_to_none=True)
-            step_loss_total = 0.0
-            step_mse_total = 0.0
-            step_sigreg_total = 0.0
+            step_metric_totals: dict[str, float] = {"train/loss": 0.0}
             step_images = 0
             step_batches = 0
             step_cursor = {"tar_index": start_tar_index, "member_index": start_member_index}
             step_model_metrics: dict[str, float] = {}
+            step_mask_metrics: dict[str, float] = {}
             step_data_time = 0.0
             step_compute_start = time.perf_counter()
 
@@ -384,8 +429,12 @@ def train(
                 step_batches += 1
 
                 with amp_context(cfg.runtime.precision, device):
-                    z_pred, z_tgt = model(images)
-                    loss, loss_components = compute_losses(z_pred, z_tgt, cfg.loss)
+                    forward_output = model(images)
+                    loss, loss_components = compute_losses(
+                        forward_output,
+                        cfg.loss,
+                        cfg.regularizer,
+                    )
 
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite loss detected at step {global_step + 1}: {loss.item()}")
@@ -393,14 +442,12 @@ def train(
                 scaled_loss = loss / cfg.runtime.grad_accumulation_steps
                 scaler.scale(scaled_loss).backward()
 
-                step_loss_total += float(loss.detach().item())
-                step_mse_total += float(loss_components["train/mse"].detach().item())
-                step_sigreg_total += float(loss_components["train/sigreg"].detach().item())
-                step_model_metrics = compute_representation_metrics(
-                    z_pred.detach(),
-                    z_tgt.detach(),
-                    collapse_threshold=cfg.loss.collapse_threshold,
-                )
+                step_metric_totals["train/loss"] += float(loss.detach().item())
+                for metric_name, metric_value in loss_components.items():
+                    step_metric_totals.setdefault(metric_name, 0.0)
+                    step_metric_totals[metric_name] += float(metric_value.detach().item())
+                step_model_metrics = _representation_metrics(cfg, forward_output)
+                step_mask_metrics = _mask_metrics(forward_output.mask_metadata)
 
             if step_batches == 0:
                 logger.info("JEPA stream exhausted after %d optimizer step(s).", global_step)
@@ -415,6 +462,7 @@ def train(
 
             scaler.step(optimizer)
             scaler.update()
+            ema_drift = model.update_target_encoder(cfg.target_encoder.ema_momentum)
             if scheduler is not None:
                 scheduler.step(global_step + 1)
             global_step += 1
@@ -423,16 +471,14 @@ def train(
             batch_time = time.perf_counter() - step_compute_start
             checkpoint_time = 0.0
 
-            loss_value = step_loss_total / step_batches
-            mse_value = step_mse_total / step_batches
-            sigreg_value = step_sigreg_total / step_batches
+            averaged_loss_metrics = {
+                key: value / step_batches for key, value in step_metric_totals.items()
+            }
             lr_value = float(optimizer.param_groups[0]["lr"])
             grad_scale = float(scaler.get_scale()) if scaler.is_enabled() else 1.0
             param_norm = parameter_l2_norm(model.parameters())
             instantaneous_metrics = {
-                "train/loss": loss_value,
-                "train/mse": mse_value,
-                "train/sigreg": sigreg_value,
+                **averaged_loss_metrics,
                 "optim/lr": lr_value,
                 "optim/grad_norm": grad_norm,
                 "optim/param_norm": param_norm,
@@ -448,15 +494,13 @@ def train(
                 "data/read_errors": float(dataset.health.read_errors),
                 "data/skipped_samples": float(dataset.health.skipped_samples),
                 "data/prefetch_stalls": float(dataset.health.prefetch_stalls),
+                "target_encoder/ema_drift": ema_drift,
                 **step_model_metrics,
+                **step_mask_metrics,
             }
-            averaged_metrics = smoother.update(
-                {
-                    "train/loss": loss_value,
-                    "train/mse": mse_value,
-                    "train/sigreg": sigreg_value,
-                }
-            )
+            if "train/sigreg" not in instantaneous_metrics:
+                instantaneous_metrics["train/sigreg"] = 0.0
+            averaged_metrics = smoother.update(_averaged_metric_inputs(instantaneous_metrics))
             log_payload = {**instantaneous_metrics, **averaged_metrics}
 
             if global_step % cfg.checkpoint.save_every_steps == 0 or global_step == cfg.runtime.max_steps:
@@ -474,6 +518,7 @@ def train(
                     data_cursor=step_cursor,
                     meter_state=smoother.state_dict(),
                     run_id=tracker.run_id,
+                    metadata=metadata,
                 )
                 step_checkpoint_path, latest_checkpoint_path = save_checkpoint_bundle(
                     checkpoint_dir=paths.checkpoints_dir,
@@ -505,6 +550,7 @@ def train(
                 health=dataset.health.to_dict(),
                 last_checkpoint=str(last_checkpoint_path) if last_checkpoint_path else resume_source,
                 resume_source=resume_source,
+                metadata=metadata,
             )
             write_state_file(paths.run_dir, latest_state)
     except Exception as exc:
@@ -530,6 +576,7 @@ def train(
             data_cursor=latest_state["data_cursor"],
             meter_state=smoother.state_dict(),
             run_id=tracker.run_id,
+            metadata=metadata,
         )
         _step_checkpoint_path, latest_checkpoint_path = save_checkpoint_bundle(
             checkpoint_dir=paths.checkpoints_dir,
@@ -554,6 +601,7 @@ def train(
         "last_checkpoint": str(last_checkpoint_path) if last_checkpoint_path else None,
         "health": dataset.health.to_dict(),
         "wandb_run_id": tracker.run_id,
+        **metadata,
     }
     logger.info("JEPA training summary: %s", json.dumps(summary, sort_keys=True))
     return summary

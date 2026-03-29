@@ -9,4 +9,5 @@ datasets
 pillow
 pyarrow
 pandas
+timm
 wandb

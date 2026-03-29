@@ -16,8 +16,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description="Train JEPA on curated tar streams.")
     parser.add_argument(
         "--config_file",
+        action="append",
         default=None,
-        help="Optional YAML config file merged on top of configs/jepa/base.yaml",
+        help="Optional YAML config file(s) merged on top of configs/jepa/base.yaml",
     )
     parser.add_argument(
         "--print_config",

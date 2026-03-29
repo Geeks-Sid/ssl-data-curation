@@ -12,31 +12,53 @@ data:
   pin_memory: true
 
 augment:
+  profile: pathology_light
   image_size: 224
-  crop_scale: [0.5, 1.0]
-  horizontal_flip_prob: 0.5
-  vertical_flip_prob: 0.5
-  brightness: 0.1
-  contrast: 0.1
-  saturation: 0.1
-  hue: 0.05
+  crop_scale: null
+  horizontal_flip_prob: null
+  vertical_flip_prob: null
+  brightness: null
+  contrast: null
+  saturation: null
+  hue: null
   normalize_mean: [0.485, 0.456, 0.406]
   normalize_std: [0.229, 0.224, 0.225]
 
 model:
+  family: lewm
   model_name: vit_small_patch16_224
   pred_depth: 6
   pred_num_heads: 6
-  proj_hidden_dim: 2048
-  proj_out_dim: 1024
-  mask_ratio: 0.6
   pretrained: false
 
+masking:
+  strategy: block_targets
+  mask_ratio: 0.6
+  num_targets: 4
+  target_scale_range: [0.15, 0.2]
+  aspect_ratio_range: [0.75, 1.5]
+  context_min_keep: 32
+  allow_overlap: false
+
+target_encoder:
+  kind: shared
+  ema_momentum: 0.996
+
+projector:
+  kind: mlp_ln
+  hidden_dim: 2048
+  out_dim: 1024
+
 loss:
-  lambda_sigreg: 0.1
-  sigreg_num_projections: 1024
-  sigreg_gamma: 1.0
+  prediction: mse
   collapse_threshold: 0.001
+
+regularizer:
+  name: gaussian_sketch
+  weight: 0.1
+  num_projections: 256
+  gamma: 1.0
+  eps: 1.0e-06
 
 optimizer:
   lr: 0.001
@@ -51,7 +73,7 @@ scheduler:
   eta_min: 0.0
 
 runtime:
-  experiment_name: baseline
+  experiment_name: lewm_default
   run_name: default
   output_root: runs/jepa
   max_steps: 1000
