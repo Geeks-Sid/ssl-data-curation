@@ -69,7 +69,7 @@ class DataConfig:
     cache_in_ram: bool = True
     manifest_shuffle: bool = False
     manifest_seed: int = 0
-    prefetch_depth: int = 2
+    prefetch_depth: int = 4
     prefetch_timeout_sec: float = 30.0
     extensions: tuple[str, ...] = ("png", "jpg", "jpeg", "tif", "tiff")
     pin_memory: bool = True
@@ -259,14 +259,20 @@ class RuntimeConfig:
 @dataclass(slots=True)
 class LoggingConfig:
     log_level: str = "INFO"
-    log_every_steps: int = 10
+    log_every_steps: int = 50
     avg_window: int = 100
+    metrics_mode: str = "essential"
+    diagnostics_every_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.log_every_steps <= 0:
             raise ValueError("logging.log_every_steps must be positive")
         if self.avg_window <= 0:
             raise ValueError("logging.avg_window must be positive")
+        if self.metrics_mode not in {"essential", "full"}:
+            raise ValueError("logging.metrics_mode must be one of: essential, full")
+        if self.diagnostics_every_steps < 0:
+            raise ValueError("logging.diagnostics_every_steps must be >= 0")
 
 
 @dataclass(slots=True)

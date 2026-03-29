@@ -36,6 +36,20 @@ class JepaLaunchTest(unittest.TestCase):
         self.assertIn(str(Path("configs/jepa/families/ijepa.yaml")), command)
         self.assertIn("runtime.experiment_name=ijepa_default", command)
         self.assertIn("runtime.run_name=ijepa_default-trial", command)
+        self.assertIn("--resume", command)
+        self.assertIn("auto", command)
+
+    def test_build_command_defaults_to_auto_resume(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            command = build_command("lewm_default")
+        resume_index = command.index("--resume")
+        self.assertEqual(command[resume_index + 1], "auto")
+
+    def test_build_command_respects_explicit_resume_override(self) -> None:
+        with mock.patch.dict(os.environ, {"RESUME": "none"}, clear=False):
+            command = build_command("lewm_default")
+        resume_index = command.index("--resume")
+        self.assertEqual(command[resume_index + 1], "none")
 
     def test_build_run_name_without_suffix(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):

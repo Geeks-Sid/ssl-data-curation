@@ -6,7 +6,7 @@ data:
   cache_in_ram: true
   manifest_shuffle: false
   manifest_seed: 0
-  prefetch_depth: 2
+  prefetch_depth: 4
   prefetch_timeout_sec: 30.0
   extensions: [png, jpg, jpeg, tif, tiff]
   pin_memory: true
@@ -76,7 +76,7 @@ runtime:
   experiment_name: lewm_default
   run_name: default
   output_root: runs/jepa
-  max_steps: 1000
+  max_steps: 100000
   batch_size: 16
   num_workers: 0
   device: auto
@@ -89,8 +89,10 @@ runtime:
 
 logging:
   log_level: INFO
-  log_every_steps: 10
+  log_every_steps: 50
   avg_window: 100
+  metrics_mode: essential
+  diagnostics_every_steps: 0
 
 checkpoint:
   save_every_steps: 100

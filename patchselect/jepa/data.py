@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
+import torchvision.io as tv_io
 import torchvision.transforms as T
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torch.utils.data import IterableDataset
 
@@ -112,10 +114,19 @@ def build_train_transform(cfg: AugmentConfig) -> T.Compose:
                 saturation=saturation,
                 hue=hue,
             ),
-            T.ToTensor(),
+            T.ConvertImageDtype(torch.float32),
             T.Normalize(mean=list(cfg.normalize_mean), std=list(cfg.normalize_std)),
         ]
     )
+
+
+def _decode_image_bytes(image_bytes: bytes, extension: str, *, device: str | torch.device = "cpu") -> torch.Tensor:
+    """Decode an encoded image into a CHW uint8 tensor."""
+    if extension in {"jpg", "jpeg"}:
+        encoded = torch.frombuffer(bytearray(image_bytes), dtype=torch.uint8)
+        return tv_io.decode_jpeg(encoded, mode=tv_io.ImageReadMode.RGB, device=device)
+    with Image.open(BytesIO(image_bytes)) as img:
+        return TF.pil_to_tensor(img.convert("RGB"))
 
 
 def discover_tar_manifest(cfg: DataConfig) -> list[ManifestEntry]:
@@ -282,8 +293,7 @@ class TarImageStream(IterableDataset):
                             self.health.read_errors += 1
                             continue
                         try:
-                            with Image.open(BytesIO(extracted.read())) as img:
-                                image = self.transform(img.convert("RGB"))
+                            image_bytes = extracted.read()
                         except Exception as exc:
                             self.health.corrupt_images += 1
                             logger.warning(
@@ -294,7 +304,8 @@ class TarImageStream(IterableDataset):
                             )
                             continue
                         yield {
-                            "image": image,
+                            "image_bytes": image_bytes,
+                            "extension": extension,
                             "tar_path": tar_source.entry.path,
                             "member_name": member.name,
                             "tar_index": tar_index,
@@ -313,12 +324,50 @@ class TarImageStream(IterableDataset):
                     Path(tar_source.local_path).unlink(missing_ok=True)
 
 
-def collate_image_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    if not samples:
-        raise ValueError("Cannot collate an empty batch")
-    images = torch.stack([sample["image"] for sample in samples], dim=0)
-    return {
-        "images": images,
-        "samples": samples,
-        "last_cursor": samples[-1]["next_cursor"],
-    }
+def build_collate_image_samples(
+    transform: T.Compose,
+    *,
+    decode_device: str | torch.device = "cpu",
+) -> Any:
+    def _collate(samples: list[dict[str, Any]]) -> dict[str, Any]:
+        if not samples:
+            raise ValueError("Cannot collate an empty batch")
+
+        images_by_index: list[torch.Tensor | None] = [None] * len(samples)
+        jpeg_indices = [
+            index for index, sample in enumerate(samples) if sample["extension"] in {"jpg", "jpeg"}
+        ]
+        if jpeg_indices:
+            encoded_batch = [
+                torch.frombuffer(bytearray(samples[index]["image_bytes"]), dtype=torch.uint8)
+                for index in jpeg_indices
+            ]
+            decoded_batch = tv_io.decode_jpeg(
+                encoded_batch,
+                mode=tv_io.ImageReadMode.RGB,
+                device=decode_device,
+            )
+            for index, image in zip(jpeg_indices, decoded_batch, strict=True):
+                images_by_index[index] = transform(image)
+
+        for index, sample in enumerate(samples):
+            if images_by_index[index] is not None:
+                continue
+            decoded = _decode_image_bytes(
+                sample["image_bytes"],
+                sample["extension"],
+                device="cpu",
+            )
+            image = transform(decoded)
+            if decode_device != "cpu":
+                image = image.to(decode_device)
+            images_by_index[index] = image
+
+        images = torch.stack([image for image in images_by_index if image is not None], dim=0)
+        return {
+            "images": images,
+            "samples": samples,
+            "last_cursor": samples[-1]["next_cursor"],
+        }
+
+    return _collate

@@ -16,3 +16,4 @@ runs/*
 ssl_data_curation.egg-info/PKG-INFO
 build/*
 launcher.bat
+.tmp-test/*

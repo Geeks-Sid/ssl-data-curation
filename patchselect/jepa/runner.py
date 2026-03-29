@@ -6,7 +6,9 @@ import contextlib
 import json
 import logging
 import math
+import queue
 import random
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,7 +31,7 @@ from patchselect.jepa.config import JEPAConfig
 from patchselect.jepa.data import (
     TarImageStream,
     build_train_transform,
-    collate_image_samples,
+    build_collate_image_samples,
     discover_tar_manifest,
     manifest_metadata,
 )
@@ -46,6 +48,9 @@ from patchselect.jepa.tracking import build_tracker
 logger = logging.getLogger(__name__)
 
 
+_BACKGROUND_PREFETCH_SENTINEL = object()
+
+
 @dataclass(slots=True)
 class RunPaths:
     run_dir: Path
@@ -55,6 +60,48 @@ class RunPaths:
     log_path: Path
     config_path: Path
     state_path: Path
+
+
+class BackgroundBatchPrefetcher:
+    """Prefetch DataLoader batches on a background thread.
+
+    This keeps the stateful iterable dataset single-consumer while overlapping
+    tar read, image decode, and augmentation with model compute. It is safe on
+    Windows because it does not rely on worker processes.
+    """
+
+    def __init__(self, loader: DataLoader, *, prefetch_batches: int = 2) -> None:
+        self._loader = loader
+        self._prefetch_batches = max(1, int(prefetch_batches))
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=self._prefetch_batches)
+        self._thread: threading.Thread | None = None
+        self._loader_iter: Any = None
+
+    def __iter__(self) -> "BackgroundBatchPrefetcher":
+        self._loader_iter = iter(self._loader)
+        self._queue = queue.Queue(maxsize=self._prefetch_batches)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+        return self
+
+    def _worker(self) -> None:
+        try:
+            if self._loader_iter is None:
+                raise RuntimeError("BackgroundBatchPrefetcher iterator was not initialized")
+            for batch in self._loader_iter:
+                self._queue.put(batch)
+        except Exception as exc:
+            self._queue.put(exc)
+        finally:
+            self._queue.put(_BACKGROUND_PREFETCH_SENTINEL)
+
+    def __next__(self) -> Any:
+        item = self._queue.get()
+        if item is _BACKGROUND_PREFETCH_SENTINEL:
+            raise StopIteration
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def build_run_paths(cfg: JEPAConfig) -> RunPaths:
@@ -244,8 +291,6 @@ def _averaged_metric_inputs(log_payload: dict[str, float]) -> dict[str, float]:
         "train/loss",
         "train/mse",
         "train/regularizer",
-        "train/sigreg",
-        "train/gaussian_sketch",
     )
     return {key: log_payload[key] for key in keys if key in log_payload}
 
@@ -289,6 +334,99 @@ def _handle_nonfinite_grad_norm(
     raise RuntimeError(f"Non-finite gradient norm at step {global_step + 1}: {grad_norm}")
 
 
+def _handle_nonfinite_loss(
+    *,
+    loss: torch.Tensor,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    global_step: int,
+) -> bool:
+    if torch.isfinite(loss):
+        return False
+    optimizer.zero_grad(set_to_none=True)
+    if scaler.is_enabled():
+        grad_scale = float(scaler.get_scale())
+        scaler.update(new_scale=max(grad_scale / 2.0, 1.0))
+        logger.warning(
+            "Skipping optimizer step %d due to non-finite loss under AMP "
+            "(loss=%s, grad_scale=%s).",
+            global_step + 1,
+            float(loss.detach().item()) if loss.numel() == 1 else loss,
+            grad_scale,
+        )
+        return True
+    raise RuntimeError(f"Non-finite loss detected at step {global_step + 1}: {loss.item()}")
+
+
+def _should_emit_log(step: int, cfg: JEPAConfig) -> bool:
+    return step == 1 or step == cfg.runtime.max_steps or step % cfg.logging.log_every_steps == 0
+
+
+def _should_emit_diagnostics(step: int, cfg: JEPAConfig) -> bool:
+    if cfg.logging.metrics_mode == "full":
+        return True
+    if cfg.logging.diagnostics_every_steps <= 0:
+        return False
+    return step == 1 or step == cfg.runtime.max_steps or step % cfg.logging.diagnostics_every_steps == 0
+
+
+def _build_essential_metrics(
+    *,
+    cfg: JEPAConfig,
+    averaged_loss_metrics: dict[str, float],
+    lr_value: float,
+    grad_norm: float,
+    step_images: int,
+    batch_time: float,
+    step_data_time: float,
+    images_seen: int,
+    ema_drift: float,
+) -> dict[str, float]:
+    effective_batch_time = max(batch_time, 1e-8)
+    metrics = {
+        "train/loss": averaged_loss_metrics["train/loss"],
+        "optim/lr": lr_value,
+        "optim/grad_norm": grad_norm,
+        "perf/images_per_sec": step_images / effective_batch_time,
+        "perf/batch_time_ms": batch_time * 1000.0,
+        "perf/data_time_ms": step_data_time * 1000.0,
+        "perf/data_wait_pct": min(step_data_time / effective_batch_time, 1.0) * 100.0,
+        "data/images_seen": float(images_seen),
+    }
+    if "train/mse" in averaged_loss_metrics:
+        metrics["train/mse"] = averaged_loss_metrics["train/mse"]
+    if cfg.regularizer.name != "none" and "train/regularizer" in averaged_loss_metrics:
+        metrics["train/regularizer"] = averaged_loss_metrics["train/regularizer"]
+    if cfg.target_encoder.kind == "ema":
+        metrics["target_encoder/ema_drift"] = ema_drift
+    return metrics
+
+
+def _format_console_log(step: int, payload: dict[str, float], avg_window: int) -> str:
+    loss_avg_key = f"train/loss_avg_{avg_window}"
+    parts = [
+        f"step={step}",
+        f"loss={payload['train/loss']:.4f}",
+    ]
+    if loss_avg_key in payload:
+        parts.append(f"loss_avg={payload[loss_avg_key]:.4f}")
+    if "train/mse" in payload:
+        parts.append(f"mse={payload['train/mse']:.4f}")
+    if "train/regularizer" in payload:
+        parts.append(f"reg={payload['train/regularizer']:.4f}")
+    parts.extend(
+        [
+            f"lr={payload['optim/lr']:.2e}",
+            f"img/s={payload['perf/images_per_sec']:.1f}",
+            f"data_wait={payload['perf/data_wait_pct']:.0f}%",
+            f"grad={payload['optim/grad_norm']:.2f}",
+        ]
+    )
+    if "target_encoder/ema_drift" in payload:
+        parts.append(f"ema={payload['target_encoder/ema_drift']:.3e}")
+    return " | ".join(parts)
+
+
 def train(
     cfg: JEPAConfig,
     resolved_config: dict[str, Any],
@@ -322,9 +460,14 @@ def train(
     resume_run_id: str | None = None
 
     resume_path = resolve_resume_path(cfg.checkpoint.resume, paths.run_dir)
-    if cfg.checkpoint.resume != "none" and resume_path is None:
+    if cfg.checkpoint.resume not in {"none", "auto"} and resume_path is None:
         raise FileNotFoundError(
             f"Requested resume mode {cfg.checkpoint.resume!r}, but no checkpoint was found for run {paths.run_dir}."
+        )
+    if cfg.checkpoint.resume == "auto" and resume_path is None:
+        logger.info(
+            "Resume mode auto requested for %s, but no checkpoint exists yet. Starting a fresh run.",
+            paths.run_dir,
         )
     if resume_path is not None:
         checkpoint = load_checkpoint(resume_path, device="cpu")
@@ -367,14 +510,19 @@ def train(
         prefetch_timeout_sec=cfg.data.prefetch_timeout_sec,
         extensions=cfg.data.extensions,
     )
+    collate_fn = build_collate_image_samples(
+        transform,
+        decode_device=device if device.type == "cuda" else "cpu",
+    )
+    use_cuda_decode = device.type == "cuda"
     loader = DataLoader(
         dataset,
         batch_size=cfg.runtime.batch_size,
         num_workers=cfg.runtime.num_workers,
-        pin_memory=cfg.data.pin_memory and device.type == "cuda",
-        collate_fn=collate_image_samples,
+        pin_memory=cfg.data.pin_memory and device.type == "cuda" and not use_cuda_decode,
+        collate_fn=collate_fn,
     )
-    loader_iter = iter(loader)
+    loader_iter = iter(BackgroundBatchPrefetcher(loader, prefetch_batches=cfg.data.prefetch_depth))
     metric_writer = JsonlMetricWriter(paths.metrics_path)
     tracker = build_tracker(
         cfg.wandb,
@@ -425,6 +573,9 @@ def train(
     caught_exception: Exception | None = None
     try:
         while global_step < cfg.runtime.max_steps:
+            next_step = global_step + 1
+            should_log = _should_emit_log(next_step, cfg)
+            should_log_diagnostics = should_log and _should_emit_diagnostics(next_step, cfg)
             optimizer.zero_grad(set_to_none=True)
             step_metric_totals: dict[str, float] = {"train/loss": 0.0}
             step_images = 0
@@ -434,6 +585,7 @@ def train(
             step_mask_metrics: dict[str, float] = {}
             step_data_time = 0.0
             step_compute_start = time.perf_counter()
+            should_skip_step = False
 
             for _micro_step in range(cfg.runtime.grad_accumulation_steps):
                 fetch_start = time.perf_counter()
@@ -461,8 +613,14 @@ def train(
                         cfg.regularizer,
                     )
 
-                if not torch.isfinite(loss):
-                    raise RuntimeError(f"Non-finite loss detected at step {global_step + 1}: {loss.item()}")
+                if _handle_nonfinite_loss(
+                    loss=loss,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    global_step=global_step,
+                ):
+                    should_skip_step = True
+                    break
 
                 scaled_loss = loss / cfg.runtime.grad_accumulation_steps
                 scaler.scale(scaled_loss).backward()
@@ -471,9 +629,12 @@ def train(
                 for metric_name, metric_value in loss_components.items():
                     step_metric_totals.setdefault(metric_name, 0.0)
                     step_metric_totals[metric_name] += float(metric_value.detach().item())
-                step_model_metrics = _representation_metrics(cfg, forward_output)
-                step_mask_metrics = _mask_metrics(forward_output.mask_metadata)
+                if should_log_diagnostics:
+                    step_model_metrics = _representation_metrics(cfg, forward_output)
+                    step_mask_metrics = _mask_metrics(forward_output.mask_metadata)
 
+            if should_skip_step:
+                continue
             if step_batches == 0:
                 logger.info("JEPA stream exhausted after %d optimizer step(s).", global_step)
                 break
@@ -505,33 +666,33 @@ def train(
                 key: value / step_batches for key, value in step_metric_totals.items()
             }
             lr_value = float(optimizer.param_groups[0]["lr"])
-            grad_scale = float(scaler.get_scale()) if scaler.is_enabled() else 1.0
-            param_norm = parameter_l2_norm(model.parameters())
-            instantaneous_metrics = {
-                **averaged_loss_metrics,
-                "optim/lr": lr_value,
-                "optim/grad_norm": grad_norm,
-                "optim/param_norm": param_norm,
-                "optim/grad_scale": grad_scale,
-                "perf/images_per_sec": step_images / max(batch_time, 1e-8),
-                "perf/batch_time_ms": batch_time * 1000.0,
-                "perf/data_time_ms": step_data_time * 1000.0,
-                "perf/checkpoint_time_ms": checkpoint_time,
-                "data/images_seen": float(images_seen),
-                "data/batches_seen": float(batches_seen),
-                "data/tar_index": float(step_cursor["tar_index"]),
-                "data/corrupt_images": float(dataset.health.corrupt_images),
-                "data/read_errors": float(dataset.health.read_errors),
-                "data/skipped_samples": float(dataset.health.skipped_samples),
-                "data/prefetch_stalls": float(dataset.health.prefetch_stalls),
-                "target_encoder/ema_drift": ema_drift,
-                **step_model_metrics,
-                **step_mask_metrics,
-            }
-            if "train/sigreg" not in instantaneous_metrics:
-                instantaneous_metrics["train/sigreg"] = 0.0
-            averaged_metrics = smoother.update(_averaged_metric_inputs(instantaneous_metrics))
-            log_payload = {**instantaneous_metrics, **averaged_metrics}
+            essential_metrics = _build_essential_metrics(
+                cfg=cfg,
+                averaged_loss_metrics=averaged_loss_metrics,
+                lr_value=lr_value,
+                grad_norm=grad_norm,
+                step_images=step_images,
+                batch_time=batch_time,
+                step_data_time=step_data_time,
+                images_seen=images_seen,
+                ema_drift=ema_drift,
+            )
+            averaged_metrics = smoother.update(_averaged_metric_inputs(essential_metrics))
+            log_payload = {**essential_metrics, **averaged_metrics}
+            if should_log_diagnostics:
+                log_payload.update(
+                    {
+                        "optim/param_norm": parameter_l2_norm(model.parameters()),
+                        "data/batches_seen": float(batches_seen),
+                        "data/tar_index": float(step_cursor["tar_index"]),
+                        "data/corrupt_images": float(dataset.health.corrupt_images),
+                        "data/read_errors": float(dataset.health.read_errors),
+                        "data/skipped_samples": float(dataset.health.skipped_samples),
+                        "data/prefetch_stalls": float(dataset.health.prefetch_stalls),
+                        **step_model_metrics,
+                        **step_mask_metrics,
+                    }
+                )
 
             if global_step % cfg.checkpoint.save_every_steps == 0 or global_step == cfg.runtime.max_steps:
                 checkpoint_start = time.perf_counter()
@@ -557,14 +718,15 @@ def train(
                     keep_last_k=cfg.checkpoint.keep_last_k,
                 )
                 checkpoint_time = (time.perf_counter() - checkpoint_start) * 1000.0
-                log_payload["perf/checkpoint_time_ms"] = checkpoint_time
+                if should_log_diagnostics:
+                    log_payload["perf/checkpoint_time_ms"] = checkpoint_time
                 last_checkpoint_path = latest_checkpoint_path
                 tracker.log_checkpoint(step_checkpoint_path, aliases=["latest", f"step-{global_step}"])
 
-            if global_step % cfg.logging.log_every_steps == 0 or global_step == 1:
+            if should_log:
                 tracker.log(log_payload, step=global_step)
                 metric_writer.write({"step": global_step, **log_payload})
-                logger.info("Step %d metrics: %s", global_step, json.dumps(log_payload, sort_keys=True))
+                logger.info("%s", _format_console_log(global_step, log_payload, cfg.logging.avg_window))
 
             latest_state = _state_payload(
                 status="running",

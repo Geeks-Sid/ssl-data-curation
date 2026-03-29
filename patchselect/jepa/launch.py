@@ -39,9 +39,9 @@ def build_command(preset: str) -> list[str]:
             f"runtime.run_name={build_run_name(preset)}",
         ]
     )
-    resume = os.environ.get("RESUME", "").strip()
-    if resume:
-        command.extend(["--resume", resume])
+    resume = os.environ.get("RESUME")
+    resume_mode = resume.strip() if resume is not None else "auto"
+    command.extend(["--resume", resume_mode or "auto"])
     return command
 
 

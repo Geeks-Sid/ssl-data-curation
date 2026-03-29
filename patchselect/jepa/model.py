@@ -18,6 +18,8 @@ from patchselect.jepa.config import (
     RegularizerConfig,
 )
 
+_MAX_REGULARIZER_LOSS = 50.0
+
 
 @dataclass(slots=True)
 class ForwardOutput:
@@ -60,15 +62,16 @@ def gaussian_sketch_regularizer(
     mean = projected.mean(dim=0)
     centered = projected - mean
     var = centered.pow(2).mean(dim=0).clamp_min(eps)
-    standardized = centered / var.sqrt()
+    standardized = (centered / var.sqrt()).clamp(min=-10.0, max=10.0)
     skew = standardized.pow(3).mean(dim=0)
     kurtosis = standardized.pow(4).mean(dim=0) - 3.0
-    return (
+    loss = (
         mean.pow(2).mean()
         + (var - 1.0).pow(2).mean()
         + skew.pow(2).mean()
         + kurtosis.pow(2).mean()
     )
+    return torch.nan_to_num(loss, nan=_MAX_REGULARIZER_LOSS, posinf=_MAX_REGULARIZER_LOSS, neginf=0.0)
 
 
 class HeavyProjector(nn.Module):
@@ -461,7 +464,7 @@ def compute_regularizer(
 ) -> torch.Tensor:
     if cfg.name == "none" or cfg.weight == 0:
         return embeddings.new_zeros(())
-    flat = embeddings.reshape(-1, embeddings.shape[-1])
+    flat = embeddings.float().reshape(-1, embeddings.shape[-1])
     if cfg.name == "sigreg":
         return sigreg_loss(
             flat,
@@ -482,11 +485,18 @@ def compute_losses(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if loss_cfg.prediction != "mse":
         raise ValueError(f"Unsupported prediction loss: {loss_cfg.prediction}")
-    loss_pred = F.mse_loss(forward_output.z_pred, forward_output.z_tgt)
-    loss_reg = compute_regularizer(
-        forward_output.regularizer_embeddings,
-        regularizer_cfg,
+    loss_pred = F.mse_loss(
+        forward_output.z_pred.float(),
+        forward_output.z_tgt.float(),
     )
+    loss_reg = compute_regularizer(forward_output.regularizer_embeddings, regularizer_cfg)
+    loss_reg = torch.nan_to_num(
+        loss_reg,
+        nan=0.0,
+        posinf=_MAX_REGULARIZER_LOSS,
+        neginf=0.0,
+    )
+    loss_reg = _MAX_REGULARIZER_LOSS * torch.tanh(loss_reg / _MAX_REGULARIZER_LOSS)
     loss = loss_pred + (regularizer_cfg.weight * loss_reg)
     metrics: dict[str, torch.Tensor] = {
         "train/mse": loss_pred,

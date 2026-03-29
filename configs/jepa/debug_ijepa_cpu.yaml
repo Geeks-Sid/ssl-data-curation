@@ -9,6 +9,8 @@ runtime:
 logging:
   log_every_steps: 1
   avg_window: 4
+  metrics_mode: full
+  diagnostics_every_steps: 1
 
 checkpoint:
   save_every_steps: 2

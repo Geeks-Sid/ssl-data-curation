@@ -283,6 +283,22 @@ class JepaTrainingTest(unittest.TestCase):
         second_state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(second_state["wandb_run_id"], run_id)
 
+    def test_auto_resume_without_checkpoint_starts_fresh(self) -> None:
+        config_path = self._write_config(
+            "auto_resume_no_ckpt.yaml",
+            {
+                "checkpoint": {"resume": "auto"},
+            },
+        )
+        dummy_wandb = DummyWandbModule()
+        self._run_main(config_path, dummy_wandb)
+
+        run_dir = self.output_root / "tests" / "auto_resume_no_ckpt"
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "completed")
+        self.assertGreaterEqual(state["global_step"], 1)
+        self.assertTrue((run_dir / "checkpoints" / "latest.pt").exists())
+
     def test_signature_mismatch_rejects_resume(self) -> None:
         config_path = self._write_config("sig_a.yaml", {})
         dummy_wandb = DummyWandbModule()
