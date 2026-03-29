@@ -1,0 +1,30 @@
+data:
+  cache_in_ram: true
+
+model:
+  model_name: vit_small_patch16_224
+  pred_depth: 2
+  proj_hidden_dim: 256
+  proj_out_dim: 128
+
+loss:
+  sigreg_num_projections: 64
+
+runtime:
+  experiment_name: debug
+  run_name: cpu-smoke
+  max_steps: 4
+  batch_size: 2
+  device: cpu
+  precision: 32
+
+logging:
+  log_every_steps: 1
+  avg_window: 4
+
+checkpoint:
+  save_every_steps: 2
+  keep_last_k: 2
+
+wandb:
+  mode: disabled

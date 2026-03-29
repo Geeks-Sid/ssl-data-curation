@@ -11,3 +11,4 @@ output_full/*
 out_full/*
 output_multi_full/*
 patchselect/lightning_logs/*
+logs_cpu_multi_60.tx6

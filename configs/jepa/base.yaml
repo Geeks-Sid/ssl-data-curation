@@ -1,0 +1,86 @@
+data:
+  tar_glob: output_multi_full/global_selection/final_selection_tars/*.tar
+  tar_paths: []
+  local_cache_dir: runs/jepa/cache
+  download_cmd: cp
+  cache_in_ram: true
+  manifest_shuffle: false
+  manifest_seed: 0
+  prefetch_depth: 2
+  prefetch_timeout_sec: 30.0
+  extensions: [png, jpg, jpeg, tif, tiff]
+  pin_memory: true
+
+augment:
+  image_size: 224
+  crop_scale: [0.5, 1.0]
+  horizontal_flip_prob: 0.5
+  vertical_flip_prob: 0.5
+  brightness: 0.1
+  contrast: 0.1
+  saturation: 0.1
+  hue: 0.05
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+model:
+  model_name: vit_small_patch16_224
+  pred_depth: 6
+  pred_num_heads: 6
+  proj_hidden_dim: 2048
+  proj_out_dim: 1024
+  mask_ratio: 0.6
+  pretrained: false
+
+loss:
+  lambda_sigreg: 0.1
+  sigreg_num_projections: 1024
+  sigreg_gamma: 1.0
+  collapse_threshold: 0.001
+
+optimizer:
+  lr: 0.001
+  weight_decay: 0.05
+  betas: [0.9, 0.999]
+  eps: 1.0e-08
+
+scheduler:
+  name: cosine_annealing_warm_restarts
+  t_0: 50
+  t_mult: 1
+  eta_min: 0.0
+
+runtime:
+  experiment_name: baseline
+  run_name: default
+  output_root: runs/jepa
+  max_steps: 1000
+  batch_size: 8
+  num_workers: 0
+  device: auto
+  precision: 16-mixed
+  seed: 42
+  grad_clip_norm: 1.0
+  grad_accumulation_steps: 1
+  matmul_precision: high
+  allow_existing_run_dir: false
+
+logging:
+  log_level: INFO
+  log_every_steps: 10
+  avg_window: 100
+
+checkpoint:
+  save_every_steps: 100
+  keep_last_k: 3
+  resume: none
+
+wandb:
+  mode: online
+  project: jepa-training
+  entity: null
+  group: null
+  job_type: train
+  tags: []
+  notes: null
+  log_checkpoints: false
