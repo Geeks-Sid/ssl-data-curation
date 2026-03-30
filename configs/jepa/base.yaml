@@ -10,6 +10,7 @@ data:
   prefetch_timeout_sec: 30.0
   extensions: [png, jpg, jpeg, tif, tiff]
   pin_memory: true
+  decode_threads: 4
 
 augment:
   profile: pathology_light
@@ -45,7 +46,7 @@ target_encoder:
   ema_momentum: 0.996
 
 projector:
-  kind: mlp_ln
+  kind: heavy_bn
   hidden_dim: 2048
   out_dim: 1024
 
@@ -54,20 +55,22 @@ loss:
   collapse_threshold: 0.001
 
 regularizer:
-  name: gaussian_sketch
-  weight: 0.1
-  num_projections: 256
+  name: sigreg
+  weight: 0.09
+  num_projections: 1024
+  sigreg_knots: 17
   gamma: 1.0
   eps: 1.0e-06
 
 optimizer:
-  lr: 0.001
-  weight_decay: 0.05
+  lr: 5.0e-05
+  weight_decay: 0.001
   betas: [0.9, 0.999]
   eps: 1.0e-08
 
 scheduler:
-  name: cosine_annealing_warm_restarts
+  name: cosine_annealing
+  warmup_steps: 500
   t_0: 50
   t_mult: 1
   eta_min: 0.0
@@ -77,13 +80,13 @@ runtime:
   run_name: default
   output_root: runs/jepa
   max_steps: 100000
-  batch_size: 16
-  num_workers: 0
+  batch_size: 256
+  num_workers: 16
   device: auto
-  precision: 16-mixed
+  precision: bf16-mixed
   seed: 42
   grad_clip_norm: 1.0
-  grad_accumulation_steps: 1
+  grad_accumulation_steps: 2
   matmul_precision: high
   allow_existing_run_dir: false
 

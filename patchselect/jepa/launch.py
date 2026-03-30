@@ -20,17 +20,13 @@ def _python_executable() -> str:
     return os.environ.get("PYTHON", sys.executable or "python")
 
 
-def _train_entrypoint() -> str:
-    return str(_repo_root() / "JEPA-train" / "train_jepa.py")
-
-
 def build_run_name(preset: str) -> str:
     suffix = os.environ.get("RUN_SUFFIX", "").strip()
     return f"{preset}-{suffix}" if suffix else preset
 
 
 def build_command(preset: str) -> list[str]:
-    command = [_python_executable(), _train_entrypoint()]
+    command = [_python_executable(), "-m", "patchselect.jepa.cli"]
     for config_path in resolve_preset(preset):
         command.extend(["--config_file", config_path])
     command.extend(

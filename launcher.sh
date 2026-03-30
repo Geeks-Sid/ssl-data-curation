@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export WANDB_API_KEY=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
 export CUDA_VISIBLE_DEVICES=1
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON:-python}"

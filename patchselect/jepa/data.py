@@ -371,3 +371,156 @@ def build_collate_image_samples(
         }
 
     return _collate
+
+
+_PIPELINE_SENTINEL = object()
+
+
+class PipelinedBatchLoader:
+    """Multi-threaded data loading pipeline for high GPU utilisation.
+
+    Architecture (3 stages, fully overlapped):
+        Stage 1 – *extraction*  (1 thread): iterates ``TarImageStream``
+            sequentially to preserve deterministic resume ordering and puts
+            raw ``{image_bytes, extension, cursor …}`` dicts into a bounded
+            queue.
+        Stage 2 – *decode + transform*  (``decode_threads`` threads via
+            ``ThreadPoolExecutor``): each worker decodes a JPEG on the CPU
+            (``torchvision.io.decode_jpeg`` releases the GIL) and applies the
+            augmentation ``transform`` pipeline, producing a float32 CHW
+            tensor.
+        Stage 3 – *batch assembly + prefetch*  (coordinator thread): collects
+            ``batch_size`` decoded tensors **in submission order**, stacks them
+            into a single tensor (optionally pinned), and places the completed
+            batch into a ready queue.
+
+    The main-thread iterator simply pops from the ready queue, so ``next()``
+    returns almost instantly as long as the pipeline keeps ahead of GPU
+    compute.
+    """
+
+    def __init__(
+        self,
+        dataset: TarImageStream,
+        *,
+        batch_size: int,
+        transform: T.Compose,
+        decode_threads: int = 4,
+        prefetch_batches: int = 4,
+        pin_memory: bool = True,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.transform = transform
+        self.decode_threads = max(1, int(decode_threads))
+        self.prefetch_batches = max(1, int(prefetch_batches))
+        self.pin_memory = pin_memory
+
+    # -- internal helpers ------------------------------------------------- #
+
+    def _decode_one(self, sample: dict[str, Any]) -> dict[str, Any]:
+        """Decode image bytes and apply *transform*.  Thread-safe."""
+        image_bytes = sample["image_bytes"]
+        extension = sample["extension"]
+        if extension in {"jpg", "jpeg"}:
+            encoded = torch.frombuffer(bytearray(image_bytes), dtype=torch.uint8)
+            image = tv_io.decode_jpeg(encoded, mode=tv_io.ImageReadMode.RGB)
+        else:
+            image = _decode_image_bytes(image_bytes, extension, device="cpu")
+        image = self.transform(image)
+        return {
+            "image": image,
+            "next_cursor": sample["next_cursor"],
+        }
+
+    def _extraction_worker(
+        self,
+        sample_q: queue.Queue,
+    ) -> None:
+        """Stage 1 – sequential tar extraction."""
+        try:
+            for sample in self.dataset:
+                sample_q.put(sample)
+        except Exception as exc:
+            sample_q.put(exc)
+        finally:
+            sample_q.put(_PIPELINE_SENTINEL)
+
+    def _assembly_worker(
+        self,
+        sample_q: queue.Queue,
+        batch_q: queue.Queue,
+    ) -> None:
+        """Stage 2+3 – parallel decode, then ordered batch assembly."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        try:
+            with ThreadPoolExecutor(
+                max_workers=self.decode_threads,
+                thread_name_prefix="jepa_decode",
+            ) as pool:
+                exhausted = False
+                while not exhausted:
+                    # Collect one batch worth of samples -------------------- #
+                    futures: list[Any] = []
+                    samples_meta: list[dict[str, Any]] = []
+                    for _ in range(self.batch_size):
+                        item = sample_q.get()
+                        if item is _PIPELINE_SENTINEL:
+                            exhausted = True
+                            break
+                        if isinstance(item, Exception):
+                            raise item
+                        futures.append(pool.submit(self._decode_one, item))
+                        samples_meta.append(item)
+
+                    if not futures:
+                        break
+
+                    # Collect results in submission order ------------------- #
+                    decoded = [f.result() for f in futures]
+                    images = torch.stack([d["image"] for d in decoded], dim=0)
+                    if self.pin_memory and images.device.type == "cpu":
+                        images = images.pin_memory()
+                    batch = {
+                        "images": images,
+                        "last_cursor": decoded[-1]["next_cursor"],
+                        "samples": samples_meta,
+                    }
+                    batch_q.put(batch)
+        except Exception as exc:
+            batch_q.put(exc)
+        finally:
+            batch_q.put(_PIPELINE_SENTINEL)
+
+    # -- public interface ------------------------------------------------- #
+
+    def __iter__(self) -> "PipelinedBatchLoader":
+        # bounded queues provide natural back-pressure
+        self._sample_q: queue.Queue = queue.Queue(
+            maxsize=self.batch_size * (self.prefetch_batches + 1),
+        )
+        self._batch_q: queue.Queue = queue.Queue(maxsize=self.prefetch_batches)
+        self._extract_thread = threading.Thread(
+            target=self._extraction_worker,
+            args=(self._sample_q,),
+            daemon=True,
+            name="jepa_extract",
+        )
+        self._assembly_thread = threading.Thread(
+            target=self._assembly_worker,
+            args=(self._sample_q, self._batch_q),
+            daemon=True,
+            name="jepa_assemble",
+        )
+        self._extract_thread.start()
+        self._assembly_thread.start()
+        return self
+
+    def __next__(self) -> dict[str, Any]:
+        item = self._batch_q.get()
+        if item is _PIPELINE_SENTINEL:
+            raise StopIteration
+        if isinstance(item, Exception):
+            raise item
+        return item

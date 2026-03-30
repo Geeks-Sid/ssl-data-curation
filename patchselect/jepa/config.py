@@ -73,6 +73,7 @@ class DataConfig:
     prefetch_timeout_sec: float = 30.0
     extensions: tuple[str, ...] = ("png", "jpg", "jpeg", "tif", "tiff")
     pin_memory: bool = True
+    decode_threads: int = 4
 
     def __post_init__(self) -> None:
         self.tar_paths = _normalize_str_seq(self.tar_paths)
@@ -81,6 +82,8 @@ class DataConfig:
             raise ValueError("data.prefetch_depth must be >= 1")
         if self.prefetch_timeout_sec <= 0:
             raise ValueError("data.prefetch_timeout_sec must be > 0")
+        if self.decode_threads < 1:
+            raise ValueError("data.decode_threads must be >= 1")
 
 
 @dataclass(slots=True)
@@ -192,9 +195,10 @@ class LossConfig:
 
 @dataclass(slots=True)
 class RegularizerConfig:
-    name: str = "gaussian_sketch"
-    weight: float = 0.1
-    num_projections: int = 256
+    name: str = "sigreg"
+    weight: float = 0.09
+    num_projections: int = 1024
+    sigreg_knots: int = 17
     gamma: float = 1.0
     eps: float = 1e-6
 
@@ -207,6 +211,8 @@ class RegularizerConfig:
             raise ValueError("regularizer.weight must be >= 0")
         if self.num_projections < 1:
             raise ValueError("regularizer.num_projections must be >= 1")
+        if self.sigreg_knots < 2:
+            raise ValueError("regularizer.sigreg_knots must be >= 2")
         if self.gamma <= 0:
             raise ValueError("regularizer.gamma must be > 0")
         if self.eps <= 0:
@@ -215,7 +221,7 @@ class RegularizerConfig:
 
 @dataclass(slots=True)
 class OptimizerConfig:
-    lr: float = 1e-3
+    lr: float = 3e-4
     weight_decay: float = 0.05
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
@@ -223,10 +229,60 @@ class OptimizerConfig:
 
 @dataclass(slots=True)
 class SchedulerConfig:
-    name: str = "cosine_annealing_warm_restarts"
+    name: str = "cosine_annealing"
+    warmup_steps: int = 500
     t_0: int = 50
     t_mult: int = 1
     eta_min: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.name not in {"none", "cosine_annealing", "cosine_annealing_warm_restarts"}:
+            raise ValueError(
+                "scheduler.name must be one of: none, cosine_annealing, cosine_annealing_warm_restarts"
+            )
+        if self.warmup_steps < 0:
+            raise ValueError("scheduler.warmup_steps must be >= 0")
+        if self.t_0 <= 0:
+            raise ValueError("scheduler.t_0 must be positive")
+        if self.t_mult < 1:
+            raise ValueError("scheduler.t_mult must be >= 1")
+        if self.eta_min < 0:
+            raise ValueError("scheduler.eta_min must be >= 0")
+
+
+@dataclass(slots=True)
+class TrainerConfig:
+    """Configuration mapping to PyTorch Lightning Trainer kwargs."""
+
+    max_steps: int = 100000
+    precision: str = "bf16-mixed"
+    gradient_clip_val: float = 1.0
+    accumulate_grad_batches: int = 1
+    log_every_n_steps: int = 50
+    enable_checkpointing: bool = True
+    num_sanity_val_steps: int = 0
+    accelerator: str = "auto"
+    devices: str | int = "auto"
+
+    def __post_init__(self) -> None:
+        if self.max_steps <= 0:
+            raise ValueError("trainer.max_steps must be positive")
+        if self.accumulate_grad_batches <= 0:
+            raise ValueError("trainer.accumulate_grad_batches must be positive")
+
+    def to_trainer_kwargs(self) -> dict[str, object]:
+        """Return kwargs suitable for pl.Trainer(**kwargs)."""
+        return {
+            "max_steps": self.max_steps,
+            "precision": self.precision,
+            "gradient_clip_val": self.gradient_clip_val,
+            "accumulate_grad_batches": self.accumulate_grad_batches,
+            "log_every_n_steps": self.log_every_n_steps,
+            "enable_checkpointing": self.enable_checkpointing,
+            "num_sanity_val_steps": self.num_sanity_val_steps,
+            "accelerator": self.accelerator,
+            "devices": self.devices,
+        }
 
 
 @dataclass(slots=True)
@@ -234,26 +290,14 @@ class RuntimeConfig:
     experiment_name: str = "default"
     run_name: str | None = "default"
     output_root: str = "runs/jepa"
-    max_steps: int = 1000
     batch_size: int = 8
-    num_workers: int = 0
-    device: str = "auto"
-    precision: str = "16-mixed"
     seed: int = 42
-    grad_clip_norm: float = 1.0
-    grad_accumulation_steps: int = 1
     matmul_precision: str = "high"
     allow_existing_run_dir: bool = False
 
     def __post_init__(self) -> None:
-        if self.max_steps <= 0:
-            raise ValueError("runtime.max_steps must be positive")
         if self.batch_size <= 0:
             raise ValueError("runtime.batch_size must be positive")
-        if self.num_workers != 0:
-            raise ValueError("runtime.num_workers must remain 0 for stateful resume safety")
-        if self.grad_accumulation_steps <= 0:
-            raise ValueError("runtime.grad_accumulation_steps must be positive")
 
 
 @dataclass(slots=True)
@@ -317,6 +361,7 @@ class JEPAConfig:
     regularizer: RegularizerConfig = field(default_factory=RegularizerConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
@@ -378,6 +423,7 @@ def load_config(
         regularizer=_section(RegularizerConfig, resolved.get("regularizer", {})),
         optimizer=_section(OptimizerConfig, resolved.get("optimizer", {})),
         scheduler=_section(SchedulerConfig, resolved.get("scheduler", {})),
+        trainer=_section(TrainerConfig, resolved.get("trainer", {})),
         runtime=_section(RuntimeConfig, resolved.get("runtime", {})),
         logging=_section(LoggingConfig, resolved.get("logging", {})),
         checkpoint=_section(CheckpointConfig, resolved.get("checkpoint", {})),

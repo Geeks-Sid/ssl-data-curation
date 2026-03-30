@@ -8,11 +8,11 @@ masking:
   strategy: block_targets
 
 projector:
-  kind: mlp_ln
+  kind: heavy_bn
 
 regularizer:
-  name: gaussian_sketch
-  weight: 0.1
+  name: sigreg
+  weight: 0.09
 
 augment:
   profile: pathology_light

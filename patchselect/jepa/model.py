@@ -29,24 +29,34 @@ class ForwardOutput:
     mask_metadata: dict[str, float | int]
 
 
-def sigreg_loss(
-    embeddings: torch.Tensor,
-    *,
-    num_projections: int = 1024,
-    gamma: float = 1.0,
-) -> torch.Tensor:
-    _batch_size, dim = embeddings.shape
-    directions = torch.randn(dim, num_projections, device=embeddings.device)
-    directions = F.normalize(directions, p=2, dim=0)
-    x = torch.matmul(embeddings, directions)
+class SIGReg(nn.Module):
+    """Sketch Isotropic Gaussian Regularizer (Epps-Pulley).
 
-    diff2 = (x.unsqueeze(1) - x.unsqueeze(0)) ** 2
-    term1 = torch.exp(-diff2 / (2 * gamma**2)).mean(dim=(0, 1))
-    c = gamma / math.sqrt(gamma**2 + 1)
-    term2 = c * torch.exp(-(x**2) / (2 * (gamma**2 + 1))).mean(dim=0)
-    term3 = gamma / math.sqrt(gamma**2 + 2)
-    loss_per_projection = term1 - (2 * term2) + term3
-    return loss_per_projection.mean()
+    Ported directly from the original LeWM implementation.
+    Uses numerical quadrature with windowed weights to compare the
+    empirical characteristic function to a Gaussian reference.
+    """
+
+    def __init__(self, knots: int = 17, num_proj: int = 1024) -> None:
+        super().__init__()
+        self.num_proj = num_proj
+        t = torch.linspace(0, 3, knots, dtype=torch.float32)
+        dt = 3.0 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt, dtype=torch.float32)
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """embeddings: (N, D) flattened patch embeddings."""
+        A = torch.randn(embeddings.size(-1), self.num_proj, device=embeddings.device)
+        A = A.div_(A.norm(p=2, dim=0))
+        x_t = (embeddings @ A).unsqueeze(-1) * self.t
+        err = (x_t.cos().mean(0) - self.phi).square() + x_t.sin().mean(0).square()
+        statistic = (err @ self.weights) * embeddings.size(0)
+        return statistic.mean()
 
 
 def gaussian_sketch_regularizer(
@@ -187,6 +197,15 @@ class TimmPathologySpatialJEPA(nn.Module):
             predictor_layer,
             num_layers=cfg.model.pred_depth,
         )
+
+        # Regularizer module (original Epps-Pulley SIGReg)
+        if cfg.regularizer.name == "sigreg":
+            self.sigreg = SIGReg(
+                knots=cfg.regularizer.sigreg_knots,
+                num_proj=cfg.regularizer.num_projections,
+            )
+        else:
+            self.sigreg = None
 
     def _resolve_grid_size(self) -> tuple[int, int]:
         patch_embed = self.encoder.patch_embed
@@ -437,8 +456,11 @@ class TimmPathologySpatialJEPA(nn.Module):
                 index=ids_mask.view(1, -1, 1).expand(batch_size, -1, self.embed_dim),
             )
             tgt_patches = self._encode_subset(self.encoder, tgt_patches)
-            z_tgt_proj = self.projector(tgt_patches)
-            regularizer_embeddings = z_tgt_proj
+            target_projection = self.projector(tgt_patches)
+            # Keep the shared target branch stop-grad for the prediction loss while
+            # still regularizing the online features.
+            z_tgt_proj = target_projection.detach()
+            regularizer_embeddings = target_projection
 
         target_pos_embeds = torch.gather(
             pos_embed.expand(batch_size, -1, -1),
@@ -461,43 +483,48 @@ class TimmPathologySpatialJEPA(nn.Module):
 def compute_regularizer(
     embeddings: torch.Tensor,
     cfg: RegularizerConfig,
+    sigreg_module: SIGReg | None = None,
 ) -> torch.Tensor:
     if cfg.name == "none" or cfg.weight == 0:
         return embeddings.new_zeros(())
-    flat = embeddings.float().reshape(-1, embeddings.shape[-1])
-    if cfg.name == "sigreg":
-        return sigreg_loss(
+    with torch.autocast(device_type=embeddings.device.type, enabled=False):
+        flat = embeddings.float().reshape(-1, embeddings.shape[-1])
+        if cfg.name == "sigreg":
+            if sigreg_module is None:
+                raise RuntimeError("SIGReg regularizer requested but no SIGReg module provided")
+            return sigreg_module(flat)
+        return gaussian_sketch_regularizer(
             flat,
             num_projections=cfg.num_projections,
-            gamma=cfg.gamma,
+            eps=cfg.eps,
         )
-    return gaussian_sketch_regularizer(
-        flat,
-        num_projections=cfg.num_projections,
-        eps=cfg.eps,
-    )
 
 
 def compute_losses(
     forward_output: ForwardOutput,
     loss_cfg: LossConfig,
     regularizer_cfg: RegularizerConfig,
+    sigreg_module: SIGReg | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if loss_cfg.prediction != "mse":
         raise ValueError(f"Unsupported prediction loss: {loss_cfg.prediction}")
-    loss_pred = F.mse_loss(
-        forward_output.z_pred.float(),
-        forward_output.z_tgt.float(),
-    )
-    loss_reg = compute_regularizer(forward_output.regularizer_embeddings, regularizer_cfg)
-    loss_reg = torch.nan_to_num(
-        loss_reg,
-        nan=0.0,
-        posinf=_MAX_REGULARIZER_LOSS,
-        neginf=0.0,
-    )
-    loss_reg = _MAX_REGULARIZER_LOSS * torch.tanh(loss_reg / _MAX_REGULARIZER_LOSS)
-    loss = loss_pred + (regularizer_cfg.weight * loss_reg)
+    with torch.autocast(device_type=forward_output.z_pred.device.type, enabled=False):
+        loss_pred = F.mse_loss(
+            forward_output.z_pred.float(),
+            forward_output.z_tgt.float(),
+        )
+        loss_reg = compute_regularizer(
+            forward_output.regularizer_embeddings,
+            regularizer_cfg,
+            sigreg_module=sigreg_module,
+        )
+        loss_reg = torch.nan_to_num(
+            loss_reg,
+            nan=0.0,
+            posinf=_MAX_REGULARIZER_LOSS,
+            neginf=0.0,
+        ).clamp(max=_MAX_REGULARIZER_LOSS)
+        loss = loss_pred + (regularizer_cfg.weight * loss_reg)
     metrics: dict[str, torch.Tensor] = {
         "train/mse": loss_pred,
         "train/regularizer": loss_reg,
