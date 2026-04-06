@@ -545,7 +545,8 @@ def allocate_bin_quotas(
     if target_size <= 0:
         return {bin_key: 0 for bin_key in bins}
 
-    weights = np.array([counts[bin_key] ** alpha for bin_key in bins], dtype=np.float64)
+    counts_array = np.array([counts[bin_key] for bin_key in bins], dtype=int)
+    weights = np.array([count ** alpha for count in counts_array], dtype=np.float64)
     weight_sum = weights.sum()
     if weight_sum <= 0:
         weights = np.ones_like(weights)
@@ -553,15 +554,11 @@ def allocate_bin_quotas(
 
     raw = target_size * weights / weight_sum
     quotas = np.floor(raw).astype(int)
-    quotas = np.minimum(
-        quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int)
-    )
+    quotas = np.minimum(quotas, counts_array)
 
     if min_quota > 0 and target_size >= len(bins) * min_quota:
         quotas = np.maximum(quotas, min_quota)
-        quotas = np.minimum(
-            quotas, np.array([counts[bin_key] for bin_key in bins], dtype=int)
-        )
+        quotas = np.minimum(quotas, counts_array)
 
     remainder = target_size - int(quotas.sum())
     if remainder > 0:
@@ -570,18 +567,46 @@ def allocate_bin_quotas(
         for idx in order:
             if remainder <= 0:
                 break
-            if quotas[idx] < counts[bins[idx]]:
+            if quotas[idx] < counts_array[idx]:
                 quotas[idx] += 1
                 remainder -= 1
 
-    if remainder > 0:
-        order = np.argsort(-np.array([counts[bin_key] for bin_key in bins]))
+    while remainder > 0:
+        capacities = counts_array - quotas
+        eligible = np.flatnonzero(capacities > 0)
+        if len(eligible) == 0:
+            break
+
+        # When clipping at bin capacity strands a large remainder, redistribute it
+        # proportionally across bins that can still accept more rows.
+        if remainder >= len(eligible):
+            eligible_weights = weights[eligible]
+            eligible_weight_sum = eligible_weights.sum()
+            if eligible_weight_sum <= 0:
+                eligible_weights = np.ones_like(eligible_weights)
+                eligible_weight_sum = eligible_weights.sum()
+            extra = np.floor(remainder * eligible_weights / eligible_weight_sum).astype(
+                int
+            )
+            extra = np.minimum(extra, capacities[eligible])
+            added = int(extra.sum())
+            if added > 0:
+                quotas[eligible] += extra
+                remainder -= added
+                continue
+
+        order = sorted(
+            eligible,
+            key=lambda idx: (weights[idx], counts_array[idx], quotas[idx]),
+            reverse=True,
+        )
         for idx in order:
             if remainder <= 0:
                 break
-            if quotas[idx] < counts[bins[idx]]:
-                quotas[idx] += 1
-                remainder -= 1
+            if quotas[idx] >= counts_array[idx]:
+                continue
+            quotas[idx] += 1
+            remainder -= 1
 
     result = {bins[idx]: int(quotas[idx]) for idx in range(len(bins))}
     logger.info(

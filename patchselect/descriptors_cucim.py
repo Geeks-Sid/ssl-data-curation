@@ -7,7 +7,8 @@ import numpy as np
 from patchselect.config import PatchSelectionConfig
 from patchselect.constants import BASE_FEATURE_NAMES
 from patchselect.descriptors import (
-    HED_FROM_RGB,
+    _HD_BASIS,
+    _HD_PINV,
     SlideStats,
     disk,
     resize_mask,
@@ -94,11 +95,17 @@ def _rgb_to_gray(rgb_u8, cp):
     return (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]) / 255.0
 
 
-def _rgb_to_hed(rgb_norm, cp):
+def _rgb_to_hd(rgb_norm, cp):
+    """2-component IHC deconvolution on GPU: returns (od, h, d, residual)."""
     od = -cp.log(cp.clip(rgb_norm, 1.0 / 255.0, 1.0))
-    matrix = cp.asarray(HED_FROM_RGB.T, dtype=cp.float32)
-    hed = od @ matrix
-    return od, hed
+    pinv = cp.asarray(_HD_PINV.T, dtype=cp.float32)   # (3, 2)
+    basis = cp.asarray(_HD_BASIS.T, dtype=cp.float32)  # (2, 3)
+    hd = od @ pinv                                     # (..., 2)
+    reconstructed = hd @ basis                          # (..., 3)
+    residual = cp.sqrt(((od - reconstructed) ** 2).sum(axis=-1))
+    h = cp.clip(hd[..., 0], 0.0, None)
+    d = cp.clip(hd[..., 1], 0.0, None)
+    return od, h, d, residual
 
 
 def _local_std(gray, cnd, cp, size: int = 7):
@@ -170,10 +177,7 @@ def compute_slide_stats_cucim(
     rgb_norm = cp.clip(
         cp.asarray(slide_rgb, dtype=cp.float32) / 255.0, 1.0 / 255.0, 1.0
     )
-    od, hed = _rgb_to_hed(rgb_norm, cp)
-    h = cp.clip(hed[..., 0], 0.0, None)
-    d = cp.clip(hed[..., 2], 0.0, None)
-    e = cp.abs(hed[..., 1])
+    od, h, d, residual = _rgb_to_hd(rgb_norm, cp)
     sat, value = _rgb_to_hsv(rgb_norm, cp)
     od_sum = od.sum(axis=-1)
     foreground_gpu = (
@@ -195,7 +199,7 @@ def compute_slide_stats_cucim(
         dab_q95=_q(d[tissue_mask], cp, 0.95, default=1.0),
         h_q05=_q(h[tissue_mask], cp, 0.05),
         h_q95=_q(h[tissue_mask], cp, 0.95, default=1.0),
-        e_q95=_q(e[tissue_mask], cp, 0.95, default=1.0),
+        residual_q95=_q(residual[tissue_mask], cp, 0.95, default=1.0),
     )
 
 
@@ -214,10 +218,7 @@ def compute_patch_descriptors_cucim(
     )
     batch = cp.asarray(np.stack(prepared_patches, axis=0), dtype=cp.float32)
     rgb_norm = cp.clip(batch / 255.0, 1.0 / 255.0, 1.0)
-    od, hed = _rgb_to_hed(rgb_norm, cp)
-    h = cp.clip(hed[..., 0], 0.0, None)
-    d = cp.clip(hed[..., 2], 0.0, None)
-    e = cp.abs(hed[..., 1])
+    od, h, d, residual = _rgb_to_hd(rgb_norm, cp)
     gray = _rgb_to_gray(batch, cp)
     sat, value = _rgb_to_hsv(rgb_norm, cp)
     od_sum = od.sum(axis=-1)
@@ -232,7 +233,7 @@ def compute_patch_descriptors_cucim(
     structure_2 = cp.asarray(disk(2))
     h_scale = max(slide_stats.h_q95 - slide_stats.h_q05, 1e-3)
     d_scale = max(slide_stats.dab_q95 - slide_stats.dab_q05, 1e-3)
-    e_scale = max(slide_stats.e_q95, 1e-3)
+    r_scale = max(slide_stats.residual_q95, 1e-3)
 
     descriptors: list[np.ndarray | None] = []
     for index in range(len(prepared_patches)):
@@ -251,14 +252,14 @@ def compute_patch_descriptors_cucim(
 
         h_i = h[index]
         d_i = d[index]
-        e_i = e[index]
+        residual_i = residual[index]
         gray_i = gray[index]
         sat_i = sat[index]
         od_sum_i = od_sum[index]
 
         hn = cp.clip((h_i - slide_stats.h_q05) / h_scale, 0.0, 1.0)
         dn = cp.clip((d_i - slide_stats.dab_q05) / d_scale, 0.0, 1.0)
-        en = cp.clip(e_i / e_scale, 0.0, 1.0)
+        rn = cp.clip(residual_i / r_scale, 0.0, 1.0)
 
         nuclei = tissue & (hn > cfg.nuclei_h_threshold)
         dab = tissue & (dn > cfg.dab_positive_threshold)
@@ -293,8 +294,8 @@ def compute_patch_descriptors_cucim(
         features[11] = _q(dn[tissue], cp, 0.10)
         features[12] = _q(dn[tissue], cp, 0.50)
         features[13] = _q(dn[tissue], cp, 0.90)
-        features[14] = _safe_mean(en[tissue], cp)
-        features[15] = _q(en[tissue], cp, 0.90)
+        features[14] = _safe_mean(rn[tissue], cp)
+        features[15] = _q(rn[tissue], cp, 0.90)
         features[16:20] = _normalized_histogram(
             hn[tissue], cp, bins=4, value_range=(0.0, 1.0)
         )
@@ -322,7 +323,7 @@ def compute_patch_descriptors_cucim(
         features[35] = _safe_mean(grad[tissue], cp)
         features[36] = _q(grad[tissue], cp, 0.90)
         features[37] = _scalar(holes.sum()) / tissue_pixels
-        features[38] = _scalar((tissue & (en > 0.30)).sum()) / tissue_pixels
+        features[38] = _scalar((tissue & (rn > 0.30)).sum()) / tissue_pixels
         features[39] = _scalar(fold.sum()) / tissue_pixels
 
         border = cp.zeros_like(tissue, dtype=bool)

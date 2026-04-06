@@ -17,3 +17,8 @@ ssl_data_curation.egg-info/PKG-INFO
 build/*
 launcher.bat
 .tmp-test/*
+output_multi_full_1_percent/*
+output_multi_full_1_percent_512/*
+patchselect/MANUSCRIPT_METHODS.md
+patchselect/MANUSCRIPT_SUPPLEMENT.md
+run_job.sh

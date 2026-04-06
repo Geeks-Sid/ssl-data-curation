@@ -12,15 +12,16 @@ from patchselect.config import PatchSelectionConfig
 from patchselect.constants import BASE_FEATURE_NAMES, FEATURE_NAMES
 
 
-RGB_FROM_HED = np.array(
-    [
-        [0.650, 0.704, 0.286],
-        [0.072, 0.990, 0.105],
-        [0.268, 0.570, 0.776],
-    ],
-    dtype=np.float32,
-)
-HED_FROM_RGB = np.linalg.inv(RGB_FROM_HED).astype(np.float32)
+# Optical density vectors for hematoxylin (H) and DAB from Ruifrok & Johnston (2001).
+# IHC uses only H + DAB; there is no eosin.  We keep the original vectors
+# but drop the eosin row and solve the 2-component problem via least-squares.
+_H_OD_VEC = np.array([0.650, 0.704, 0.286], dtype=np.float32)
+_DAB_OD_VEC = np.array([0.268, 0.570, 0.776], dtype=np.float32)
+
+# 3×2 basis matrix  (columns = H, DAB)
+_HD_BASIS = np.stack([_H_OD_VEC, _DAB_OD_VEC], axis=1).astype(np.float32)
+# Pseudoinverse (2×3): maps OD → [H, DAB] via least-squares
+_HD_PINV = np.linalg.pinv(_HD_BASIS).astype(np.float32)
 
 
 @dataclass(slots=True)
@@ -29,7 +30,7 @@ class SlideStats:
     dab_q95: float
     h_q05: float
     h_q95: float
-    e_q95: float
+    residual_q95: float
 
 
 def disk(radius: int) -> np.ndarray:
@@ -120,10 +121,23 @@ def rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return sat.astype(np.float32), value.astype(np.float32)
 
 
-def rgb_to_hed(rgb: np.ndarray) -> np.ndarray:
-    rgb = np.clip(rgb.astype(np.float32) / 255.0, 1.0 / 255.0, 1.0)
-    od = -np.log(rgb)
-    return od @ HED_FROM_RGB.T
+def rgb_to_hd(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Decompose RGB into H, DAB, and per-pixel residual for IHC images.
+
+    Returns
+    -------
+    h : np.ndarray  – hematoxylin optical density (≥ 0)
+    d : np.ndarray  – DAB optical density (≥ 0)
+    residual : np.ndarray – per-pixel L2 reconstruction error
+    """
+    rgb_norm = np.clip(rgb.astype(np.float32) / 255.0, 1.0 / 255.0, 1.0)
+    od = -np.log(rgb_norm)
+    hd = od @ _HD_PINV.T                          # (H, W, 2)
+    reconstructed = hd @ _HD_BASIS.T               # (H, W, 3)
+    residual = np.sqrt(((od - reconstructed) ** 2).sum(axis=-1))  # (H, W)
+    h = np.clip(hd[..., 0], 0.0, None)
+    d = np.clip(hd[..., 1], 0.0, None)
+    return h, d, residual
 
 
 def build_tissue_mask(
@@ -164,10 +178,7 @@ def compute_slide_stats(
     else:
         slide_rgb = rgb
         slide_foreground = foreground_mask
-    hed = rgb_to_hed(slide_rgb)
-    h = np.clip(hed[..., 0], 0.0, None)
-    d = np.clip(hed[..., 2], 0.0, None)
-    e = np.abs(hed[..., 1])
+    h, d, residual = rgb_to_hd(slide_rgb)
     sat, value = rgb_to_hsv(slide_rgb)
     od_sum = (
         -np.log(np.clip(slide_rgb.astype(np.float32) / 255.0, 1.0 / 255.0, 1.0))
@@ -186,7 +197,7 @@ def compute_slide_stats(
         dab_q95=q(d[tissue_mask], 0.95, default=1.0),
         h_q05=q(h[tissue_mask], 0.05),
         h_q95=q(h[tissue_mask], 0.95, default=1.0),
-        e_q95=q(e[tissue_mask], 0.95, default=1.0),
+        residual_q95=q(residual[tissue_mask], 0.95, default=1.0),
     )
 
 
@@ -239,10 +250,7 @@ def compute_patch_descriptor(
             else foreground_mask
         )
     rgb = patch_rgb.astype(np.float32)
-    hed = rgb_to_hed(rgb)
-    h = np.clip(hed[..., 0], 0.0, None)
-    d = np.clip(hed[..., 2], 0.0, None)
-    e = np.abs(hed[..., 1])
+    h, d, residual = rgb_to_hd(rgb)
     gray = rgb_to_gray(patch_rgb)
     sat, value = rgb_to_hsv(patch_rgb)
     od_sum = (-np.log(np.clip(rgb / 255.0, 1.0 / 255.0, 1.0))).sum(axis=-1)
@@ -255,7 +263,7 @@ def compute_patch_descriptor(
 
     hn = normalize_channel(h, slide_stats.h_q05, slide_stats.h_q95)
     dn = normalize_channel(d, slide_stats.dab_q05, slide_stats.dab_q95)
-    en = np.clip(e / max(slide_stats.e_q95, 1e-3), 0.0, 1.0)
+    rn = np.clip(residual / max(slide_stats.residual_q95, 1e-3), 0.0, 1.0)
 
     nuclei = tissue & (hn > cfg.nuclei_h_threshold)
     dab = tissue & (dn > cfg.dab_positive_threshold)
@@ -290,8 +298,8 @@ def compute_patch_descriptor(
     features[11] = q(dn[tissue], 0.10)
     features[12] = q(dn[tissue], 0.50)
     features[13] = q(dn[tissue], 0.90)
-    features[14] = safe_mean(en[tissue])
-    features[15] = q(en[tissue], 0.90)
+    features[14] = safe_mean(rn[tissue])
+    features[15] = q(rn[tissue], 0.90)
     features[16:20] = normalized_histogram(hn[tissue], bins=4, value_range=(0.0, 1.0))
     features[20:24] = normalized_histogram(dn[tissue], bins=4, value_range=(0.0, 1.0))
     features[24] = safe_mean(dn[dab])
@@ -311,7 +319,7 @@ def compute_patch_descriptor(
     features[35] = safe_mean(grad[tissue])
     features[36] = q(grad[tissue], 0.90)
     features[37] = float(holes.sum() / tissue_pixels)
-    features[38] = float((tissue & (en > 0.30)).sum() / tissue_pixels)
+    features[38] = float((tissue & (rn > 0.30)).sum() / tissue_pixels)
     features[39] = float(fold.sum() / tissue_pixels)
     features[40] = border_fraction(tissue, tissue_pixels, cfg.border_width)
     loc_fracs = np.array([features[29], features[30], features[31]], dtype=np.float32)

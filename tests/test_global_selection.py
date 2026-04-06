@@ -1,11 +1,18 @@
 import unittest
 from pathlib import Path
 import shutil
+import math
+from collections import Counter
 
 import pandas as pd
 
 from patchselect.config import GlobalSelectionConfig
-from patchselect.selection import cudf, resolve_dataframe_backend, run_global_selection
+from patchselect.selection import (
+    allocate_bin_quotas,
+    cudf,
+    resolve_dataframe_backend,
+    run_global_selection,
+)
 
 
 def make_candidate_row(
@@ -63,6 +70,24 @@ class GlobalSelectionTest(unittest.TestCase):
             self.skipTest("cudf is installed in this environment")
         with self.assertRaises(ImportError):
             resolve_dataframe_backend("cudf")
+
+    def test_allocate_bin_quotas_fully_redistributes_clipped_remainder(self) -> None:
+        counts = Counter({("large", 1.0, 0, 0): 100})
+        for index in range(20):
+            counts[(f"tiny-{index}", 1.0, 0, 0)] = 1
+
+        quotas = allocate_bin_quotas(
+            counts=counts,
+            target_size=80,
+            alpha=0.5,
+            min_quota=0,
+        )
+
+        self.assertEqual(sum(quotas.values()), 80)
+        self.assertEqual(quotas[("large", 1.0, 0, 0)], 60)
+        self.assertTrue(
+            all(quotas[(f"tiny-{index}", 1.0, 0, 0)] == 1 for index in range(20))
+        )
 
     def test_global_selection_keeps_nan_bin_rows(self) -> None:
         frame = pd.DataFrame(
@@ -259,6 +284,145 @@ class GlobalSelectionTest(unittest.TestCase):
                 sorted(selected["objective_score"].tolist(), reverse=True),
                 [0.9, 0.8],
             )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_global_selection_backfills_non_finite_scores_to_meet_quota(self) -> None:
+        frame = pd.DataFrame(
+            [
+                make_candidate_row(
+                    sample_suffix="a",
+                    source_index=0,
+                    patch_index=0,
+                    tissue="bone marrow",
+                    is_cancer=0.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=0.90,
+                ),
+                make_candidate_row(
+                    sample_suffix="b",
+                    source_index=0,
+                    patch_index=1,
+                    tissue="bone marrow",
+                    is_cancer=0.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=0.80,
+                ),
+                make_candidate_row(
+                    sample_suffix="c",
+                    source_index=0,
+                    patch_index=2,
+                    tissue="bone marrow",
+                    is_cancer=0.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=0.70,
+                ),
+                make_candidate_row(
+                    sample_suffix="d",
+                    source_index=0,
+                    patch_index=3,
+                    tissue="bone marrow",
+                    is_cancer=0.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=math.nan,
+                ),
+                make_candidate_row(
+                    sample_suffix="e",
+                    source_index=0,
+                    patch_index=4,
+                    tissue="bone marrow",
+                    is_cancer=0.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=math.nan,
+                ),
+            ]
+        )
+
+        root = Path(__file__).resolve().parents[1] / "out" / "_test_global_selection"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            candidate_path = root / "candidates.parquet"
+            output_dir = root / "out"
+            frame.to_parquet(candidate_path, index=False)
+
+            result = run_global_selection(
+                [candidate_path],
+                output_dir,
+                GlobalSelectionConfig(target_size=4, bin_alpha=1.0),
+            )
+
+            self.assertEqual(result["selected_rows"], 4)
+            final_files = sorted((output_dir / "final_selection").glob("*.parquet"))
+            self.assertEqual(len(final_files), 1)
+
+            selected = pd.concat(
+                [pd.read_parquet(path) for path in final_files], ignore_index=True
+            )
+            self.assertEqual(len(selected), 4)
+            self.assertEqual(selected["objective_score"].notna().sum(), 3)
+            self.assertEqual(selected["objective_score"].isna().sum(), 1)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_global_selection_fills_target_after_bin_capacity_clipping(self) -> None:
+        rows = []
+        for patch_index in range(100):
+            rows.append(
+                make_candidate_row(
+                    sample_suffix=f"large-{patch_index}",
+                    source_index=0,
+                    patch_index=patch_index,
+                    tissue="large-bin",
+                    is_cancer=1.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=1.0 - (patch_index / 1000.0),
+                )
+            )
+        for offset in range(20):
+            rows.append(
+                make_candidate_row(
+                    sample_suffix=f"tiny-{offset}",
+                    source_index=1,
+                    patch_index=offset,
+                    tissue=f"tiny-bin-{offset}",
+                    is_cancer=1.0,
+                    state_bin=0,
+                    interface_bin=0,
+                    objective_score=0.5 - (offset / 1000.0),
+                )
+            )
+        frame = pd.DataFrame(rows)
+
+        root = Path(__file__).resolve().parents[1] / "out" / "_test_global_selection"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            candidate_path = root / "candidates.parquet"
+            output_dir = root / "out"
+            frame.to_parquet(candidate_path, index=False)
+
+            result = run_global_selection(
+                [candidate_path],
+                output_dir,
+                GlobalSelectionConfig(target_size=80, bin_alpha=0.5),
+            )
+
+            self.assertEqual(result["selected_rows"], 80)
+            final_files = sorted((output_dir / "final_selection").glob("*.parquet"))
+            self.assertEqual(len(final_files), 1)
+
+            selected = pd.concat(
+                [pd.read_parquet(path) for path in final_files], ignore_index=True
+            )
+            self.assertEqual(len(selected), 80)
+            self.assertEqual((selected["tissue"] == "large-bin").sum(), 60)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

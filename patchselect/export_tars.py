@@ -12,6 +12,7 @@ import sys
 import tarfile
 from pathlib import Path
 from typing import Any
+import uuid
 
 import pandas as pd
 import pyarrow.dataset as ds
@@ -410,7 +411,7 @@ def export_selected_patches_to_tars(
             f"max_images_per_tar must be >= 1, got {max_images_per_tar}"
         )
 
-    partition_root = output_dir / "shard_partitions"
+    partition_root = output_dir / "shard_partitions" / f"run_{uuid.uuid4().hex}"
     token_to_shard = partition_final_selection_by_shard(
         final_selection_files, partition_root
     )
